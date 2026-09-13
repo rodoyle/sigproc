@@ -1,0 +1,10 @@
+[package]
+name = "sigproc"
+version = "0.1.0"
+edition = "2021"
+
+# Use nightly toolchain for std::fmaf support (FMA instruction)
+# rust-version = "1.76"  # or latest stable when f32::fma is stabilized
+
+# No external dependencies required - uses pure Rust with f32::fma for FMA operations
+
