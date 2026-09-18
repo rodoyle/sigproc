@@ -27,8 +27,11 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Download UHD FPGA images (B200/B210 firmware)
-RUN /usr/lib/uhd/utils/uhd_images_downloader.py -i /usr/share/uhd/images
+# Download UHD FPGA images (B200/B210 firmware).
+# Debian installs the tool at /usr/libexec/uhd/utils/ with a wrapper in /usr/bin.
+# Non-fatal: the LibreSDR B210 FPGA is fetched separately below regardless.
+RUN uhd_images_downloader -i /usr/share/uhd/images \
+    || echo "WARN: uhd_images_downloader failed — continuing (LibreSDR FPGA fetched separately)"
 
 # LibreSDR B210-specific FPGA binary
 RUN wget -q \
