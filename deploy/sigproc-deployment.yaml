@@ -23,7 +23,12 @@ spec:
       # USB passthrough: privileged + hostPID for /dev/bus/usb access
       hostPID: true
       imagePullSecrets:
-        - name: rodoyle-pull-secret
+        # ghcr.io pull credentials. Must exist in this namespace:
+        #   kubectl -n default create secret generic ghcr-pull \
+        #     --type=kubernetes.io/dockerconfigjson \
+        #     --from-file=.dockerconfigjson=<ghcr-dockerconfigjson>
+        # (default/rodoyle-pull-secret only carries quay.io creds, not ghcr.io)
+        - name: ghcr-pull
       containers:
         - name: sigproc
           image: ghcr.io/rodoyle/sigproc:latest
