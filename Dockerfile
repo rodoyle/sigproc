@@ -48,6 +48,17 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Debian's uhd.pc advertises -lboost_system, but Boost >= 1.69 ships
+# boost_system as header-only and Debian trixie provides no
+# libboost_system.so (libboost-system-dev is a docs-only transitional
+# package). uhd-sys reads its link flags from this .pc via metadeps, so the
+# final link fails with "cannot find -lboost_system". Drop the stale flag.
+RUN PC=$(find /usr -name uhd.pc -print -quit) \
+    && test -n "$PC" \
+    && sed -i 's/[[:space:]]*-lboost_system//g' "$PC" \
+    && echo "patched $PC:" \
+    && cat "$PC"
+
 # UHD FPGA images. Debian installs the downloader in /usr/libexec/uhd/utils
 # with a wrapper in /usr/bin. Non-fatal — the LibreSDR B210 FPGA is fetched
 # separately below regardless.
