@@ -1,0 +1,23 @@
+# PVC for kaniko build scratch — SMB-backed to avoid SD-card I/O on rpi-four-2.
+#
+# Kaniko writes layer tarballs and its internal working files into
+# --kaniko-dir. Putting that on SMB (bulk sequential writes) is much faster
+# than the Pi's SD card.
+#
+# Note: the container's writable overlay rootfs (kubelet-managed) cannot be
+# relocated here — only kaniko's own scratch dir can.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kaniko-scratch
+  namespace: build
+  labels:
+    app: sigproc
+    type: kaniko-build
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: smb
+  resources:
+    requests:
+      storage: 20Gi

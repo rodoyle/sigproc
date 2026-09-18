@@ -4,8 +4,16 @@
 # ghcr.io/rodoyle/sigproc:latest. Requires the `ghcr-push` secret in the
 # `build` namespace (docker config.json format).
 #
-# Apply: kubectl apply -f deploy/kaniko-job.yaml
-# Then:  kubectl -n build logs job/kaniko-build-sigproc -f
+# Performance notes (rpi-four-2 has a slow SD card):
+#   --snapshot-mode=redo   only re-hash files whose mtime changed, instead of
+#                          hashing the whole filesystem after every RUN step
+#                          (the default `full` mode was the dominant cost)
+#   --kaniko-dir           kaniko scratch (layer tarballs) on the SMB-backed
+#                          PVC, so bulk writes skip the SD card
+#
+# Apply the PVC first:  kubectl apply -f deploy/kaniko-scratch-pvc.yaml
+# Apply the job:        kubectl apply -f deploy/kaniko-job.yaml
+# Follow the build:     kubectl -n build logs job/kaniko-build-sigproc -f
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -15,7 +23,7 @@ metadata:
     app: sigproc
     type: kaniko-build
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   ttlSecondsAfterFinished: 3600
   template:
     spec:
@@ -47,19 +55,25 @@ spec:
             - --destination=ghcr.io/rodoyle/sigproc:latest
             - --cache=true
             - --cache-ttl=24h
+            # Faster snapshots: only re-hash mtime-changed files
+            - --snapshot-mode=redo
+            # Kaniko scratch on SMB instead of the Pi's SD card
+            - --kaniko-dir=/kaniko-scratch
           volumeMounts:
             - name: workspace
               mountPath: /workspace
             - name: kaniko-secret
               mountPath: /kaniko/.docker
               readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1000m"
             limits:
-              memory: "2Gi"
-              cpu: "2000m"
+              memory: "4Gi"
+              cpu: "3000m"
       volumes:
         - name: workspace
           emptyDir: {}
@@ -69,3 +83,6 @@ spec:
             items:
               - key: .dockerconfigjson
                 path: config.json
+        - name: kaniko-scratch
+          persistentVolumeClaim:
+            claimName: kaniko-scratch
