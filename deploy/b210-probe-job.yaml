@@ -1,0 +1,48 @@
+# B210 verification Job — proves USB passthrough + UHD work on rpi-four-2.
+#
+# WHY A SEPARATE JOB: UHD grants exclusive access to a USRP. While the
+# sigproc Deployment is streaming, `uhd_usrp_probe` inside that pod fails with
+# "No devices found". This Job must therefore run when sigproc is NOT holding
+# the device — scale the Deployment to 0 first:
+#
+#   kubectl scale deploy/sigproc --replicas=0
+#   kubectl apply -f deploy/b210-probe-job.yaml
+#   kubectl logs job/b210-probe
+#   kubectl scale deploy/sigproc --replicas=1
+#
+# Expect exit 0 and B210 identification in the output.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: b210-probe
+  namespace: default
+  labels:
+    app: sigproc
+    type: verification
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: rpi-four-2
+      hostPID: true
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: probe
+          image: ghcr.io/rodoyle/sigproc:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+          command: ["uhd_usrp_probe"]
+          # The image ENTRYPOINT is /usr/local/bin/sigproc; override it so the
+          # probe runs instead of the capture daemon.
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
