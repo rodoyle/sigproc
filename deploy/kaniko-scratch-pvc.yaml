@@ -17,7 +17,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: smb
+  storageClassName: smb-mfsymlinks
   resources:
     requests:
       storage: 20Gi
