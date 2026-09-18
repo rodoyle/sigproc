@@ -5,11 +5,20 @@
 # `build` namespace (docker config.json format).
 #
 # Performance notes (rpi-four-2 has a slow SD card):
-#   --snapshot-mode=redo   only re-hash files whose mtime changed, instead of
+#   --snapshot-mode=redo   only re-hash files whose mtime changed instead of
 #                          hashing the whole filesystem after every RUN step
-#                          (the default `full` mode was the dominant cost)
+#                          (default `full` mode was the dominant build cost)
 #   --kaniko-dir           kaniko scratch (layer tarballs) on the SMB-backed
-#                          PVC, so bulk writes skip the SD card
+#                          PVC so bulk writes skip the SD card
+#
+# SMB caveats (why this job looks the way it does):
+#   * CIFS has no native symlinks, so the PVC's StorageClass adds the
+#     `mfsymlinks` mount option. Without it kaniko fails with
+#     "symlink ... operation not supported".
+#   * Kaniko chowns/rewrites $KANIKO_DIR/.docker, which a read-only secret
+#     mount cannot satisfy ("chown ... read-only file system"). So the
+#     credentials are copied onto the writable SMB volume by an init
+#     container instead of being mounted read-only into kaniko.
 #
 # Apply the PVC first:  kubectl apply -f deploy/kaniko-scratch-pvc.yaml
 # Apply the job:        kubectl apply -f deploy/kaniko-job.yaml
@@ -41,10 +50,26 @@ spec:
             - |
               git clone https://github.com/rodoyle/sigproc.git /workspace
               echo "Cloned sigproc repo to /workspace"
-              ls -la /workspace
           volumeMounts:
             - name: workspace
               mountPath: /workspace
+        # ── Stage registry credentials on the writable SMB scratch ─────
+        - name: stage-kaniko-creds
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /kaniko-scratch/.docker
+              cp /secret/.dockerconfigjson /kaniko-scratch/.docker/config.json
+              chmod 0600 /kaniko-scratch/.docker/config.json
+              echo "Staged kaniko docker config"
+          volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
       containers:
         # ── Build with kaniko and push to GHCR ─────────────────────────
         - name: kaniko
@@ -62,9 +87,6 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-            - name: kaniko-secret
-              mountPath: /kaniko/.docker
-              readOnly: true
             - name: kaniko-scratch
               mountPath: /kaniko-scratch
           resources:
@@ -82,7 +104,7 @@ spec:
             secretName: ghcr-push
             items:
               - key: .dockerconfigjson
-                path: config.json
+                path: .dockerconfigjson
         - name: kaniko-scratch
           persistentVolumeClaim:
             claimName: kaniko-scratch
