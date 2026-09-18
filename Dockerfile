@@ -2,42 +2,28 @@
 #
 # Multi-stage build targeting linux/arm64 for Raspberry Pi 4 deployment.
 # Kaniko builds this natively on an arm64 cluster node; no QEMU needed.
+#
+# UHD is installed from Debian's native repos (no Ubuntu PPA — Debian
+# trixie removed software-properties-common and Ubuntu PPAs don't target
+# trixie). rust:latest is Debian-trixie-based as of 2026.
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 # Nightly Rust per locked decision #6 (NEON intrinsics for ARM64).
-# Docker Hub has no `rust:nightly` tag — use latest stable and rustup to nightly.
+# Docker Hub has no `rust:nightly` tag — use latest stable + rustup nightly.
 FROM --platform=linux/arm64 rust:latest AS builder
 RUN rustup default nightly && rustup target add aarch64-unknown-linux-gnu
 
-# Install UHD build-time dependencies.
-# Try Ettus PPA first; fall back to source build if arm64 packages unavailable.
+# Install UHD build-time dependencies from Debian repos.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        software-properties-common \
+        libuhd-dev \
+        uhd-host \
         python3 \
         ca-certificates \
         wget \
         cmake \
         build-essential \
         libusb-1.0-0-dev \
-    && ( \
-        add-apt-repository -y ppa:ettusresearch/uhd \
-        && apt-get update \
-        && apt-get install -y --no-install-recommends libuhd-dev uhd-host \
-    ) || ( \
-        echo "Ettus PPA unavailable (arm64 fallback) — building UHD from source" \
-        && mkdir -p /tmp/uhd-build \
-        && cd /tmp/uhd-build \
-        && wget -q https://github.com/EttusResearch/uhd/releases/download/v4.7.0.0/uhd-4.7.0.0.tar.gz \
-        && tar xzf uhd-4.7.0.0.tar.gz \
-        && cd uhd-4.7.0.0/host \
-        && mkdir build && cd build \
-        && cmake -DCMAKE_BUILD_TYPE=Release .. \
-        && make -j$(nproc) \
-        && make install \
-        && ldconfig \
-        && rm -rf /tmp/uhd-build \
-    ) \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -64,18 +50,14 @@ COPY src/ src/
 RUN cargo build --release
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 debian:bookworm-slim
+FROM --platform=linux/arm64 debian:trixie-slim
 
 # Install UHD runtime (libs + tools including uhd_usrp_probe for verification)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        software-properties-common \
+        uhd-host \
         python3 \
         ca-certificates \
-    && add-apt-repository -y ppa:ettusresearch/uhd \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        uhd-host \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
