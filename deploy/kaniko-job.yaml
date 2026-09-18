@@ -1,0 +1,71 @@
+# Kaniko Job: builds sigproc Dockerfile and pushes to GHCR
+#
+# Runs on any arm64 node. Clones the repo, builds via kaniko, pushes to
+# ghcr.io/rodoyle/sigproc:latest. Requires the `ghcr-push` secret in the
+# `build` namespace (docker config.json format).
+#
+# Apply: kubectl apply -f deploy/kaniko-job.yaml
+# Then:  kubectl -n build logs job/kaniko-build-sigproc -f
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build-sigproc
+  namespace: build
+  labels:
+    app: sigproc
+    type: kaniko-build
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      # Target any arm64 node for native build
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      restartPolicy: Never
+      initContainers:
+        # ── Clone the sigproc repo ──────────────────────────────────────
+        - name: git-clone
+          image: alpine/git:latest
+          command:
+            - sh
+            - -c
+            - |
+              git clone https://github.com/rodoyle/sigproc.git /workspace
+              echo "Cloned sigproc repo to /workspace"
+              ls -la /workspace
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        # ── Build with kaniko and push to GHCR ─────────────────────────
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc:latest
+            - --cache=true
+            - --cache-ttl=24h
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-secret
+              mountPath: /kaniko/.docker
+              readOnly: true
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: kaniko-secret
+          secret:
+            secretName: ghcr-push
+            items:
+              - key: .dockerconfigjson
+                path: config.json

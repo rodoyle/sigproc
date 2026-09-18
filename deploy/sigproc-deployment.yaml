@@ -1,0 +1,55 @@
+# Deployment: sigproc RF front-end on rpi-four-2
+# Pins to the node with the B210 USB SDR, runs privileged for USB access.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sigproc
+  namespace: default
+  labels:
+    app: sigproc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sigproc
+  template:
+    metadata:
+      labels:
+        app: sigproc
+    spec:
+      # Pin to the node with the LibreSDR B210
+      nodeSelector:
+        kubernetes.io/hostname: rpi-four-2
+      # USB passthrough: privileged + hostPID for /dev/bus/usb access
+      hostPID: true
+      imagePullSecrets:
+        - name: rodoyle-pull-secret
+      containers:
+        - name: sigproc
+          image: ghcr.io/rodoyle/sigproc:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+          env:
+            - name: RUST_LOG
+              value: info
+            # Config path (default in the binary, explicit here for clarity)
+            - name: SIGPROC_CONFIG
+              value: /etc/sigproc/config.toml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sigproc
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+      volumes:
+        - name: config
+          configMap:
+            name: sigproc-config
+      # Avoid scheduling on nodes without the hardware
+      restartPolicy: Always

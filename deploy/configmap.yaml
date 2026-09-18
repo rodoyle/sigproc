@@ -1,0 +1,32 @@
+# ConfigMap: sigproc RF capture configuration
+# Mounted at /etc/sigproc/config.toml inside the container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigproc-config
+  namespace: default
+  labels:
+    app: sigproc
+data:
+  config.toml: |
+    [device]
+    # UHD device args — leave empty for auto-discovery of first device.
+    # For a specific B210: device_args = "type=b200,serial=ABC123"
+    device_args = ""
+
+    [rf]
+    # Center frequency in Hz (915 MHz ISM band default)
+    center_freq = 915_000_000.0
+    # Sample rate in Hz (2 MS/s)
+    sample_rate = 2_000_000.0
+    # RX gain in dB
+    rx_gain = 30.0
+    # Antenna port: "RX2" on B210, "TX/RX" on B200
+    antenna = "RX2"
+    # Bandwidth in Hz
+    bandwidth = 2_000_000.0
+
+    [forwarding]
+    # Waterfall VITA49 UDP consumer destination
+    vita49_dest_host = "waterfall-service.default.svc.cluster.local"
+    vita49_dest_port = 4820

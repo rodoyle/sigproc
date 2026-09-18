@@ -2,9 +2,28 @@
 name = "sigproc"
 version = "0.1.0"
 edition = "2021"
+description = "SDR RF front-end — UHD capture + VITA49 UDP forward for LibreSDR B210"
 
-# Use nightly toolchain for std::fmaf support (FMA instruction)
-# rust-version = "1.76"  # or latest stable when f32::fma is stabilized
+[features]
+# UHD + capture support — requires libuhd-dev (enabled by default for Docker build)
+default = ["uhd-support"]
+uhd-support = ["dep:uhd", "dep:num-complex"]
 
-# No external dependencies required - uses pure Rust with f32::fma for FMA operations
+[dependencies]
+# UHD bindings (optional — gated behind uhd-support feature)
+uhd = { version = "0.4", optional = true }
+num-complex = { version = "0.4", optional = true }
 
+# Config file parsing
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# CLI (--dry-run, --version, --config)
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
