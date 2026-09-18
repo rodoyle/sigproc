@@ -3,19 +3,35 @@
 # Multi-stage build targeting linux/arm64 for Raspberry Pi 4 deployment.
 # Kaniko builds this natively on an arm64 cluster node; no QEMU needed.
 #
-# UHD is installed from Debian's native repos (no Ubuntu PPA — Debian
-# trixie removed software-properties-common and Ubuntu PPAs don't target
-# trixie). rust:latest is Debian-trixie-based as of 2026.
+# UHD comes from Debian's native repos (no Ubuntu PPA — Debian trixie removed
+# software-properties-common and PPAs don't target trixie). rust:latest is
+# Debian-trixie-based as of 2026.
+#
+# Rust dependency caching uses the cargo-chef 3-stage pattern:
+#   chef    — toolchain + cargo-chef binary
+#   planner — generates recipe.json from the real source tree
+#   builder — cooks deps from recipe.json (cached layer), then builds the crate
 
-# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+# ── Stage 1: Chef — toolchain + cargo-chef ────────────────────────────────────
 # Nightly Rust per locked decision #6 (NEON intrinsics for ARM64).
 # Docker Hub has no `rust:nightly` tag — use latest stable + rustup nightly.
-FROM --platform=linux/arm64 rust:latest AS builder
-RUN rustup default nightly && rustup target add aarch64-unknown-linux-gnu
+FROM --platform=linux/arm64 rust:latest AS chef
+RUN rustup default nightly
+RUN cargo install cargo-chef
 
-# Install UHD build-time dependencies from Debian repos.
-# pkg-config: uhd-sys uses metadeps to locate the UHD library.
-# libclang-dev: uhd-sys uses bindgen to generate bindings from uhd.h.
+# ── Stage 2: Planner — derive the dependency recipe from real sources ─────────
+FROM chef AS planner
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ── Stage 3: Builder — UHD, cached deps, then the crate ──────────────────────
+FROM chef AS builder
+
+# UHD build-time deps.
+#   pkg-config  — uhd-sys uses metadeps to locate the UHD library
+#   libclang    — uhd-sys uses bindgen to generate bindings from uhd.h
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libuhd-dev \
@@ -32,9 +48,9 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Download UHD FPGA images (B200/B210 firmware).
-# Debian installs the tool at /usr/libexec/uhd/utils/ with a wrapper in /usr/bin.
-# Non-fatal: the LibreSDR B210 FPGA is fetched separately below regardless.
+# UHD FPGA images. Debian installs the downloader in /usr/libexec/uhd/utils
+# with a wrapper in /usr/bin. Non-fatal — the LibreSDR B210 FPGA is fetched
+# separately below regardless.
 RUN uhd_images_downloader -i /usr/share/uhd/images \
     || echo "WARN: uhd_images_downloader failed — continuing (LibreSDR FPGA fetched separately)"
 
@@ -43,24 +59,21 @@ RUN wget -q \
         https://github.com/lmesserStep/LibreSDRB210/raw/main/usrp_b210_fpga.bin \
         -O /usr/share/uhd/images/usrp_b210_fpga.bin
 
-# Install cargo-chef for Rust dependency layer caching
-RUN cargo install cargo-chef
-
 WORKDIR /build
+
+# Cook dependencies only — this layer is cached while recipe.json is unchanged
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy real sources and build the binary (only this layer invalidates on edits)
 COPY Cargo.toml Cargo.lock ./
-
-# Prepare and cache dependencies (layer cache hit when Cargo.toml unchanged)
-RUN cargo chef prepare --recipe-path recipe.json \
-    && cargo chef cook --release --recipe-path recipe.json
-
-# Copy source and build the binary
 COPY src/ src/
 RUN cargo build --release
 
-# ── Stage 2: Runtime ───────────────────────────────────────────────────────────
+# ── Stage 4: Runtime ─────────────────────────────────────────────────────────
 FROM --platform=linux/arm64 debian:trixie-slim
 
-# Install UHD runtime (libs + tools including uhd_usrp_probe for verification)
+# UHD runtime (libs + tools including uhd_usrp_probe for verification)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         uhd-host \
