@@ -5,7 +5,9 @@
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 # Nightly Rust per locked decision #6 (NEON intrinsics for ARM64).
-FROM --platform=linux/arm64 rust:nightly AS builder
+# Docker Hub has no `rust:nightly` tag — use latest stable and rustup to nightly.
+FROM --platform=linux/arm64 rust:latest AS builder
+RUN rustup default nightly && rustup target add aarch64-unknown-linux-gnu
 
 # Install UHD build-time dependencies.
 # Try Ettus PPA first; fall back to source build if arm64 packages unavailable.
