@@ -18,8 +18,8 @@ num-complex = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
-# CLI (--dry-run, --version, --config)
-clap = { version = "4", features = ["derive"] }
+# CLI (--dry-run, --version, --config); `env` enables #[arg(env = ...)]
+clap = { version = "4", features = ["derive", "env"] }
 
 # Error handling
 anyhow = "1"
