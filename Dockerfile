@@ -14,10 +14,15 @@ FROM --platform=linux/arm64 rust:latest AS builder
 RUN rustup default nightly && rustup target add aarch64-unknown-linux-gnu
 
 # Install UHD build-time dependencies from Debian repos.
+# pkg-config: uhd-sys uses metadeps to locate the UHD library.
+# libclang-dev: uhd-sys uses bindgen to generate bindings from uhd.h.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libuhd-dev \
         uhd-host \
+        pkg-config \
+        libclang-dev \
+        clang \
         python3 \
         ca-certificates \
         wget \
