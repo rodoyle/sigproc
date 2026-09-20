@@ -12,7 +12,10 @@ mod config;
 
 #[cfg(feature = "uhd-support")]
 mod capture;
-#[cfg(feature = "uhd-support")]
+// The VITA49 framer only needs `std` + `log`, so it is compiled unconditionally:
+// that keeps `cargo test --no-default-features` (no UHD installed) able to test
+// the wire format, which is the part that must not regress.
+#[cfg_attr(not(feature = "uhd-support"), allow(dead_code))]
 mod vita49;
 
 // ── UHD-enabled binary (default feature) ─────────────────────────────────────
