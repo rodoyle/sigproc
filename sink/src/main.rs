@@ -39,7 +39,8 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:4920")]
     listen: SocketAddr,
 
-    /// Give up waiting after this many seconds.
+    /// Give up waiting after this many seconds. `0` means run forever (a standing
+    /// consumer), which is how the chain is deployed until the demod exists.
     #[arg(long, default_value_t = 10.0)]
     duration: f64,
 
@@ -57,9 +58,16 @@ struct Cli {
     tone_tolerance: f64,
 
     /// Exit once this long has passed with no packets, after at least one has
-    /// arrived. Keeps a replay gate fast without guessing a duration.
+    /// arrived. Keeps a replay gate fast without guessing a duration. `0` disables
+    /// the idle exit, which a long-running consumer needs.
     #[arg(long, default_value_t = 1.5)]
     idle_exit_secs: f64,
+
+    /// Log a verdict line every this many seconds while running. `0` logs only at
+    /// exit. A standing consumer needs this: its logs are the only way to see that
+    /// the stream is still healthy.
+    #[arg(long, default_value_t = 0.0)]
+    report_interval: f64,
 
     /// Keep at most this many samples for measurement (most recent wins, so the
     /// measured block sits after the filters have settled).
@@ -93,8 +101,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     );
 
     let started = Instant::now();
-    let deadline = started + Duration::from_secs_f64(cli.duration.max(0.0));
-    let idle_limit = Duration::from_secs_f64(cli.idle_exit_secs.max(0.0));
+    // A non-positive duration means "no deadline": a standing consumer should not
+    // die on a timer.
+    let deadline = if cli.duration > 0.0 {
+        Some(started + Duration::from_secs_f64(cli.duration))
+    } else {
+        None
+    };
+    let idle_limit = if cli.idle_exit_secs > 0.0 {
+        Some(Duration::from_secs_f64(cli.idle_exit_secs))
+    } else {
+        None
+    };
 
     let mut buf = vec![0u8; 65_536];
     let mut packets: u64 = 0;
@@ -103,6 +121,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let mut last_packet_at: Option<Instant> = None;
     let mut tracker = GapTracker::new();
     let mut measure: Vec<Iq> = Vec::new();
+    let mut last_report = Instant::now();
 
     loop {
         match socket.recv_from(&mut buf) {
@@ -136,15 +155,30 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 let now = Instant::now();
-                if let Some(last) = last_packet_at {
-                    if now.duration_since(last) >= idle_limit {
-                        log::info!("stream idle for {:?}; finishing", idle_limit);
+                if let (Some(last), Some(limit)) = (last_packet_at, idle_limit) {
+                    if now.duration_since(last) >= limit {
+                        log::info!("stream idle for {limit:?}; finishing");
                         break;
                     }
                 }
-                if now >= deadline {
-                    log::info!("reached --duration; finishing");
-                    break;
+                if let Some(deadline) = deadline {
+                    if now >= deadline {
+                        log::info!("reached --duration; finishing");
+                        break;
+                    }
+                }
+                // Periodic health line for a standing consumer: without it the
+                // pod is silent until the day it exits.
+                if cli.report_interval > 0.0
+                    && now.duration_since(last_report) >= Duration::from_secs_f64(cli.report_interval)
+                {
+                    last_report = now;
+                    log::info!(
+                        "standing: packets={packets} samples={samples} malformed={malformed} \
+                         seq_gaps={} gap_samples={}",
+                        tracker.gaps(),
+                        tracker.gap_samples()
+                    );
                 }
             }
             Err(e) => log::error!("receive error: {e}"),

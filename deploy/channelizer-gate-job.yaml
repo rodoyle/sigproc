@@ -1,0 +1,100 @@
+# Job: the in-cluster end-to-end gate.
+#
+# Runs the channelizer in REPLAY mode against the deterministic fixture, sending
+# its narrowband output over the real Service to the standing sink. The point is
+# that everything except the packet source is production: the same image, the
+# same ConfigMap, the same UDP transport, the same parser downstream.
+#
+# Apply order matters: the sink must be listening before this Job drains its
+# fixture, otherwise the output is sent to a pod that is not yet bound and the
+# assertions would fail for a reason that has nothing to do with the pipeline.
+#
+#   kubectl apply -f deploy/vita49-sink-deployment.yaml
+#   kubectl apply -f deploy/vita49-sink-service.yaml
+#   kubectl rollout status deploy/vita49-sink
+#   kubectl apply -f deploy/channelizer-gate-job.yaml
+#   kubectl wait --for=condition=complete job/sigproc-channelizer-gate
+#     --timeout=300s
+#   kubectl logs job/sigproc-channelizer-gate | grep -q '"ok":true'
+#
+# The fixture init container is what makes the input deterministic inside the
+# cluster: no PVC, no host copy, no synthetic producer service.
+#
+# Re-create the Job between runs (Jobs are immutable and are not re-run):
+#   kubectl delete job sigproc-channelizer-gate --ignore-not-found
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sigproc-channelizer-gate
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+    type: gate
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      imagePullSecrets:
+        - name: ghcr-pull
+      initContainers:
+        - name: fixture
+          image: ghcr.io/rodoyle/sigproc-fixture:latest
+          imagePullPolicy: Always
+          args:
+            - --am
+            - --tone-hz=1000
+            - --offset-hz=200000
+            - --seconds=1
+            - --out=/fixtures/am.vita49
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+      containers:
+        - name: channelizer-replay
+          image: ghcr.io/rodoyle/sigproc-channelizer:latest
+          imagePullPolicy: Always
+          # mode and file come from the CLI, overriding the ConfigMap's udp mode:
+          # that is why the gate can run the production image unchanged.
+          args:
+            - --config=/etc/sigproc/config.toml
+            - --input=replay
+            - --file=/fixtures/am.vita49
+            - --report=/fixtures/gate-report.json
+          env:
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1500m"
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+            - name: config
+              mountPath: /etc/sigproc
+              readOnly: true
+      volumes:
+        - name: fixtures
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: sigproc-channelizer-config

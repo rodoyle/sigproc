@@ -1,0 +1,45 @@
+# ConfigMap: channelizer configuration.
+# Mounted at /etc/sigproc/config.toml inside the channelizer pod.
+#
+# The [rf] block describes the *wideband input stream* this service consumes
+# (only sample_rate drives the channel plan; center_freq and the gain fields are
+# part of the shared schema and recorded for clarity). The channelizer never
+# touches a radio — that is the whole point of the service split.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigproc-channelizer-config
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+data:
+  config.toml: |
+    [rf]
+    # Wideband input stream: 915 MHz ISM, 2 MS/s.
+    center_freq = 915_000_000.0
+    sample_rate = 2_000_000.0
+    rx_gain = 30.0
+    antenna = "RX2"
+    bandwidth = 2_000_000.0
+
+    [forwarding]
+    # Narrowband output. Until the demod microservice exists this points at the
+    # in-repo sink, so the deployed chain always terminates in something that
+    # can say whether the stream is healthy.
+    vita49_dest_host = "vita49-sink.default.svc.cluster.local"
+    vita49_dest_port = 4920
+
+    [input]
+    # Production: consume the wideband VITA49 stream. The end-to-end gate
+    # overrides this on the command line (--input replay --file ...), which is
+    # why the mode is a CLI-overridable config value rather than baked in.
+    mode = "udp"
+    listen = "0.0.0.0:4810"
+    metrics_listen = "0.0.0.0:8080"
+
+    [channel]
+    # 915 MHz + 200 kHz, decimated 2 MS/s -> 50 kS/s (40 = 10 x 4).
+    # 48 kS/s is deliberately NOT used: 2e6/48e3 is not a whole number, and the
+    # config loader refuses it with that reason.
+    offset_hz = 200_000.0
+    output_rate_hz = 50_000.0

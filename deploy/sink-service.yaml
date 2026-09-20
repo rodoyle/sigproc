@@ -1,0 +1,22 @@
+# Service: sink ingress for the channelizer's narrowband output.
+#
+# A UDP ClusterIP Service is a name plus a port mapping; k3s programs the DNAT.
+# It exists so the channelizer's destination is a stable DNS name rather than a
+# pod IP, and so the demod microservice can later take this port's place without
+# touching the channelizer's configuration.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vita49-sink
+  namespace: default
+  labels:
+    app: vita49-sink
+spec:
+  type: ClusterIP
+  selector:
+    app: vita49-sink
+  ports:
+    - name: vita49-in
+      port: 4920
+      targetPort: vita49-in
+      protocol: UDP

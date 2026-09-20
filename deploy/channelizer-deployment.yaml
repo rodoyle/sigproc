@@ -1,0 +1,120 @@
+# Deployment: channelizer service.
+#
+#   sigproc (B210) --VITA49/UDP--> sigproc-channelizer --VITA49/UDP--> sink
+#
+# This pod needs NO hardware: it reads a UDP stream and writes another. That is
+# what makes it schedulable anywhere, unlike the capture service, which is
+# pinned to the node with the B210 on its USB bus.
+#
+# Architecture: the image is arm64 (the cluster's kaniko builder runs on arm64
+# nodes), so the node selector requires arm64. It also *prefers* not to share a
+# node with the capture service, which holds a real-time USB stream open —
+# single-core cost measured at ~1/15 of real time on an amd64 host, so a Pi 4
+# has headroom, but it should not compete with UHD for it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sigproc-channelizer
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sigproc-channelizer
+  template:
+    metadata:
+      labels:
+        app: sigproc-channelizer
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sigproc
+                topologyKey: kubernetes.io/hostname
+      imagePullSecrets:
+        - name: ghcr-pull
+      # The verification fixture is generated in-cluster by the fixture image
+      # into a shared emptyDir: deterministic input with no PVC and no host
+      # copy, and the very bytes the end-to-end gate replays.
+      initContainers:
+        - name: fixture
+          image: ghcr.io/rodoyle/sigproc-fixture:latest
+          imagePullPolicy: Always
+          args:
+            - --am
+            - --tone-hz=1000
+            - --offset-hz=200000
+            - --seconds=1
+            - --out=/fixtures/am.vita49
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+      containers:
+        - name: channelizer
+          image: ghcr.io/rodoyle/sigproc-channelizer:latest
+          imagePullPolicy: Always
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: SIGPROC_CONFIG
+              value: /etc/sigproc/config.toml
+          ports:
+            - name: vita49-in
+              containerPort: 4810
+              protocol: UDP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          # /healthz comes from the same dependency-free HTTP server as
+          # /metrics.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "256Mi"
+              cpu: "1500m"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sigproc
+              readOnly: true
+            - name: fixtures
+              mountPath: /fixtures
+      volumes:
+        - name: config
+          configMap:
+            name: sigproc-channelizer-config
+        - name: fixtures
+          emptyDir: {}

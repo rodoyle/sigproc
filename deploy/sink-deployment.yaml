@@ -1,0 +1,69 @@
+# Deployment: standing verification consumer.
+#
+# The chain has to terminate in something that can say whether the stream is
+# healthy. Until the demod microservice exists, this sink is that terminus: it
+# parses the narrowband VITA49 with the shared parser and logs a verdict line
+# every 30 seconds, so `kubectl logs deploy/vita49-sink` answers "is the channel
+# still arriving, and is it still contiguous?" without shelling into a pod.
+#
+# It is deliberately NOT a probe-only pod: `--duration 0 --idle-exit-secs 0`
+# means "never exit", because a consumer that dies when the producer pauses
+# would restart-loop exactly when the stream is being diagnosed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vita49-sink
+  namespace: default
+  labels:
+    app: vita49-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vita49-sink
+  template:
+    metadata:
+      labels:
+        app: vita49-sink
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: sink
+          image: ghcr.io/rodoyle/sigproc-sink:latest
+          imagePullPolicy: Always
+          args:
+            - --listen=0.0.0.0:4920
+            - --expect-rate=50000
+            - --duration=0
+            - --idle-exit-secs=0
+            - --report-interval=30
+          env:
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: vita49-in
+              containerPort: 4920
+              protocol: UDP
+          # A UDP consumer has no endpoint to probe, so this proves the binary
+          # is alive. Stream health is in the periodic log line.
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/vita49-sink", "--version"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "1000m"

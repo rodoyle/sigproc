@@ -1,0 +1,25 @@
+# Service: channelizer ingress (wideband VITA49 in) and metrics endpoint.
+#
+# Two ports on one Service because they belong to one workload:
+#   vita49-in (UDP 4810) — upstream producers (today: sigproc capture)
+#   metrics   (TCP 8080) — Prometheus scrape / manual curl
+apiVersion: v1
+kind: Service
+metadata:
+  name: sigproc-channelizer
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+spec:
+  type: ClusterIP
+  selector:
+    app: sigproc-channelizer
+  ports:
+    - name: vita49-in
+      port: 4810
+      targetPort: vita49-in
+      protocol: UDP
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
