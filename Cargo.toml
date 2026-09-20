@@ -1,29 +1,35 @@
-[package]
-name = "sigproc"
+# sigproc — signal processing microservice chain (Cargo workspace)
+#
+# Layout: one child directory per service, each with its own binary target and
+# its own Dockerfile. The shared `common/` crate owns everything that must not
+# diverge between services — above all the VITA 49.0 wire format, which is the
+# contract between capture, channelizer and any downstream consumer.
+#
+#   common/       lib  sigproc-common      (wire format, config, DSP)
+#   capture/      bin  sigproc             (UHD capture — needs libuhd to build)
+#   channelizer/  bin  sigproc-channelizer (wideband -> narrowband channel)
+#   fixture/      bin  sigproc-fixture     (deterministic IQ/VITA49 test vectors)
+#   sink/         bin  vita49-sink         (receiving assertion sink for gates)
+#
+# Only the `capture` member needs the UHD toolchain. Everything else builds and
+# tests on a host with no libuhd installed, so CI can run the full DSP suite:
+#   cargo test --workspace --no-default-features
+[workspace]
+resolver = "2"
+members = ["common", "capture", "channelizer", "fixture", "sink"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "SDR RF front-end — UHD capture + VITA49 UDP forward for LibreSDR B210"
 
-[features]
-# UHD + capture support — requires libuhd-dev (enabled by default for Docker build)
-default = ["uhd-support"]
-uhd-support = ["dep:uhd", "dep:num-complex"]
-
-[dependencies]
-# UHD bindings (optional — gated behind uhd-support feature)
-uhd = { version = "0.4", optional = true }
-num-complex = { version = "0.4", optional = true }
-
-# Config file parsing
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-
-# CLI (--dry-run, --version, --config); `env` enables #[arg(env = ...)]
-clap = { version = "4", features = ["derive", "env"] }
-
+[workspace.dependencies]
 # Error handling
 anyhow = "1"
-
 # Logging
 log = "0.4"
 env_logger = "0.11"
+# Config file parsing
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# CLI (`env` enables #[arg(env = ...)])
+clap = { version = "4", features = ["derive", "env"] }

@@ -1,4 +1,8 @@
-# Kaniko Job: builds sigproc Dockerfile and pushes to GHCR
+# Kaniko Job: builds the sigproc CAPTURE Dockerfile and pushes to GHCR
+#
+# Workspace layout: the capture image is built from capture/Dockerfile, which
+# builds only the `sigproc` workspace member. The channelizer/fixture/sink
+# members have their own Dockerfiles (they need no UHD).
 #
 # Runs on any arm64 node. Clones the repo, builds via kaniko, pushes to
 # ghcr.io/rodoyle/sigproc:latest. Requires the `ghcr-push` secret in the
@@ -76,7 +80,7 @@ spec:
           image: gcr.io/kaniko-project/executor:latest
           args:
             - --context=dir:///workspace
-            - --dockerfile=Dockerfile
+            - --dockerfile=capture/Dockerfile
             - --destination=ghcr.io/rodoyle/sigproc:latest
             - --cache=true
             - --cache-ttl=24h

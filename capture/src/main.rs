@@ -1,53 +1,55 @@
-//! sigproc — SDR RF front-end for LibreSDR B210
+//! sigproc — SDR RF front-end for LibreSDR B210.
 //!
 //! Discovers a USRP B210 via UHD, configures RF parameters from a
 //! config.toml, acquires sc16 IQ samples, and forwards them as
 //! VITA 49.0 IF Data Packets over UDP to a downstream waterfall consumer.
 //!
-//! Requires the `uhd-support` feature (default). Without it, only
-//! the FMA kernel library (`lib.rs`) is compiled — tests pass anywhere
-//! without UHD installed.
+//! VITA49 framing and config parsing now live in `sigproc-common`, because the
+//! channelizer and any other consumer share that wire format. This binary owns
+//! only the UHD capture path.
+//!
+//! The CLI is parsed in **every** build configuration so `--version` works even
+//! where libuhd is absent (the crate is not UHD-dependent for the CLI). Only
+//! the capture path requires the `uhd-support` feature (default).
 
-mod config;
+use clap::Parser;
+use std::path::PathBuf;
 
 #[cfg(feature = "uhd-support")]
 mod capture;
-// The VITA49 framer only needs `std` + `log`, so it is compiled unconditionally:
-// that keeps `cargo test --no-default-features` (no UHD installed) able to test
-// the wire format, which is the part that must not regress.
-#[cfg_attr(not(feature = "uhd-support"), allow(dead_code))]
-mod vita49;
 
-// ── UHD-enabled binary (default feature) ─────────────────────────────────────
-#[cfg(feature = "uhd-support")]
+/// SDR RF front-end: UHD capture + VITA49 UDP forward.
+#[derive(Parser, Debug)]
+#[command(name = "sigproc", version, about)]
+struct Cli {
+    /// Path to config.toml (default: $SIGPROC_CONFIG or /etc/sigproc/config.toml)
+    #[arg(
+        short,
+        long,
+        env = "SIGPROC_CONFIG",
+        default_value = "/etc/sigproc/config.toml"
+    )]
+    config: PathBuf,
+
+    /// Dry-run: load config, probe device, print info, then exit.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    run(cli)
+}
+
+// ── UHD-enabled capture path (default feature) ───────────────────────────────
+#[cfg(feature = "uhd-support")]
+fn run(cli: Cli) -> anyhow::Result<()> {
     use anyhow::Context;
-    use clap::Parser;
-    use std::path::PathBuf;
-
-    /// SDR RF front-end: UHD capture + VITA49 UDP forward.
-    #[derive(Parser, Debug)]
-    #[command(name = "sigproc", version, about)]
-    struct Cli {
-        /// Path to config.toml (default: $SIGPROC_CONFIG or /etc/sigproc/config.toml)
-        #[arg(
-            short,
-            long,
-            env = "SIGPROC_CONFIG",
-            default_value = "/etc/sigproc/config.toml"
-        )]
-        config: PathBuf,
-
-        /// Dry-run: load config, probe device, print info, then exit.
-        #[arg(long)]
-        dry_run: bool,
-    }
+    use sigproc_common::{config, vita49};
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
-
-    let cli = Cli::parse();
 
     log::info!("sigproc v{} starting", env!("CARGO_PKG_VERSION"));
     log::info!("config path: {}", cli.config.display());
@@ -131,12 +133,13 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-// ── Stub binary (no uhd-support feature — for cargo test --lib only) ──────────
+// ── Stub path (no uhd-support feature — build/test without libuhd) ───────────
 #[cfg(not(feature = "uhd-support"))]
-fn main() {
-    eprintln!(
-        "sigproc: built without uhd-support feature. \
-         Rebuild with --features uhd-support (default) for the capture binary."
+fn run(_cli: Cli) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "sigproc v{} built without the uhd-support feature: capture needs libuhd. \
+         Rebuild with --features uhd-support (the default) to stream from a USRP. \
+         The VITA49 framer itself is testable here: cargo test -p sigproc-common",
+        env!("CARGO_PKG_VERSION")
     );
-    std::process::exit(1);
 }

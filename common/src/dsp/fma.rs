@@ -1,7 +1,9 @@
-// SIGProc - Signal Processing Library with ARM64/NEON Fused Multiply-Add Kernels
-//
-// This library provides high-performance fused multiply-add (FMA) operations for
-// signal processing applications on aarch64 and x86_64 platforms.
+//! Fused multiply-add (FMA) kernels for aarch64 (NEON) and x86_64.
+//!
+//! Moved verbatim from the single-crate `lib.rs`, tests included. On aarch64
+//! with nightly Rust these compile to `fmaf` intrinsics which map to NEON; on
+//! stable they are scalar. Nothing here depends on UHD, so the whole module is
+//! exercised by `cargo test --workspace --no-default-features` on any host.
 
 /// Scalar Fused Multiply-Add operation: computes `a * b + c`
 #[inline]
@@ -13,7 +15,7 @@ pub fn fmaf(a: f32, b: f32, c: f32) -> f32 {
 // On aarch64 with nightly Rust, this will compile to `fmaf` intrinsics which map to NEON
 pub fn fused_multiply_add_8lane(a: &[f32], b: &[f32], c: &mut [f32]) -> Result<(), String> {
     let n = a.len().min(b.len()).min(c.len());
-    
+
     if n < 1 {
         return Err("Input arrays must not be empty".to_string());
     }
@@ -38,7 +40,7 @@ pub fn fused_multiply_add_kernel(a: &[f32], b: &[f32], c: &mut [f32]) -> Result<
     // Process all elements with FMA operations in chunks of 8 for ARM64 NEON efficiency
     for i in (0..n).step_by(8) {
         let count = (n - i).min(8);
-        
+
         for j in 0..count {
             c[i + j] = fmaf(a[i + j], b[i + j], 0.0);
         }
@@ -49,9 +51,9 @@ pub fn fused_multiply_add_kernel(a: &[f32], b: &[f32], c: &mut [f32]) -> Result<
 
 /// FMA kernel with scalar offset (c parameter as accumulator base)
 pub fn fused_multiply_add_kernel_with_offset(
-    a: &[f32], 
-    b: &[f32], 
-    c: &mut [f32]
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
 ) -> Result<(), String> {
     let n = a.len().min(b.len()).min(c.len());
 
@@ -62,7 +64,7 @@ pub fn fused_multiply_add_kernel_with_offset(
     // Process all elements with FMA operations using scalar offset pattern
     for i in (0..n).step_by(8) {
         let count = (n - i).min(8);
-        
+
         for j in 0..count {
             c[i + j] = fmaf(a[i + j], b[i + j], 0.0);
         }

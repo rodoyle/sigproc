@@ -2,8 +2,8 @@
 //!
 //! Wraps the `uhd` crate: find B210, configure RF, stream sc16 IQ samples.
 
-use crate::config::RfConfig;
 use num_complex::Complex;
+use sigproc_common::config::RfConfig;
 use uhd::{
     ReceiveStreamer, StreamArgs, StreamCommand, StreamCommandType, StreamTime, TuneRequest, Usrp,
 };

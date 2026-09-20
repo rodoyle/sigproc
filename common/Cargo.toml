@@ -1,0 +1,11 @@
+[package]
+name = "sigproc-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared contracts and DSP primitives for the sigproc microservice chain"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+toml.workspace = true

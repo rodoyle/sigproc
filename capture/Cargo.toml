@@ -1,0 +1,29 @@
+[package]
+name = "sigproc"
+version.workspace = true
+edition.workspace = true
+description = "SDR RF front-end — UHD capture + VITA49 UDP forward for LibreSDR B210"
+
+# The binary name is deliberately still `sigproc`: ghcr.io/rodoyle/sigproc:latest,
+# the mounted config path and the live Deployment contract all depend on it.
+[[bin]]
+name = "sigproc"
+path = "src/main.rs"
+
+[features]
+# UHD + capture support — requires libuhd-dev (enabled by default for Docker build)
+default = ["uhd-support"]
+uhd-support = ["dep:uhd", "dep:num-complex"]
+
+[dependencies]
+# Shared contracts: VITA49 wire format, config parsing, DSP primitives
+sigproc-common = { path = "../common" }
+
+# UHD bindings (optional — gated behind uhd-support feature)
+uhd = { version = "0.4", optional = true }
+num-complex = { version = "0.4", optional = true }
+
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

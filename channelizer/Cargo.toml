@@ -1,0 +1,17 @@
+[package]
+name = "sigproc-channelizer"
+version.workspace = true
+edition.workspace = true
+description = "Channelizer: isolate one narrowband channel from the wideband VITA49 stream"
+
+[[bin]]
+name = "sigproc-channelizer"
+path = "src/main.rs"
+
+[dependencies]
+sigproc-common = { path = "../common" }
+
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

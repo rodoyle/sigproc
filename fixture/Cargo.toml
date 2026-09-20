@@ -1,0 +1,17 @@
+[package]
+name = "sigproc-fixture"
+version.workspace = true
+edition.workspace = true
+description = "Deterministic VITA49 test vectors (AM/DSB analogue signal in wideband IQ)"
+
+[[bin]]
+name = "sigproc-fixture"
+path = "src/main.rs"
+
+[dependencies]
+sigproc-common = { path = "../common" }
+
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

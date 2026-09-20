@@ -1,4 +1,8 @@
-# sigproc — SDR RF front-end container for LibreSDR B210 (arm64)
+# sigproc (capture) — SDR RF front-end container for LibreSDR B210 (arm64)
+#
+# Builds ONLY the `capture` workspace member. The other members
+# (channelizer, fixture, sink) have their own Dockerfiles because they have no
+# UHD dependency at all and are an order of magnitude cheaper to build.
 #
 # Multi-stage build targeting linux/arm64 for Raspberry Pi 4 deployment.
 # Kaniko builds this natively on an arm64 cluster node; no QEMU needed.
@@ -11,6 +15,11 @@
 #   chef    — toolchain + cargo-chef binary
 #   planner — generates recipe.json from the real source tree
 #   builder — cooks deps from recipe.json (cached layer), then builds the crate
+#
+# Workspace caveat: `cargo chef prepare` resolves the WHOLE workspace, so every
+# member's manifest AND source must exist in the planner stage. Copying only
+# capture/ would make the recipe wrong (missing members) and silently degrade
+# the cached dependency layer into a full rebuild.
 
 # ── Stage 1: Chef — toolchain + cargo-chef ────────────────────────────────────
 # Nightly Rust per locked decision #6 (NEON intrinsics for ARM64).
@@ -23,7 +32,16 @@ RUN cargo install cargo-chef
 FROM chef AS planner
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
+COPY common/Cargo.toml common/
+COPY capture/Cargo.toml capture/
+COPY channelizer/Cargo.toml channelizer/
+COPY fixture/Cargo.toml fixture/
+COPY sink/Cargo.toml sink/
+COPY common/src/ common/src/
+COPY capture/src/ capture/src/
+COPY channelizer/src/ channelizer/src/
+COPY fixture/src/ fixture/src/
+COPY sink/src/ sink/src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 3: Builder — UHD, cached deps, then the crate ──────────────────────
@@ -76,10 +94,14 @@ WORKDIR /build
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
-# Copy real sources and build the binary (only this layer invalidates on edits)
+# Copy real sources and build the capture binary (only this layer invalidates)
 COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-RUN cargo build --release
+COPY common/ common/
+COPY capture/ capture/
+COPY channelizer/ channelizer/
+COPY fixture/ fixture/
+COPY sink/ sink/
+RUN cargo build --release --package sigproc
 
 # ── Stage 4: Runtime ─────────────────────────────────────────────────────────
 FROM --platform=linux/arm64 debian:trixie-slim

@@ -1,0 +1,17 @@
+[package]
+name = "vita49-sink"
+version.workspace = true
+edition.workspace = true
+description = "VITA49 UDP assertion sink — prints one JSON verdict line for verification"
+
+[[bin]]
+name = "vita49-sink"
+path = "src/main.rs"
+
+[dependencies]
+sigproc-common = { path = "../common" }
+
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
