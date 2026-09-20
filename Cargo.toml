@@ -31,5 +31,7 @@ env_logger = "0.11"
 # Config file parsing
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Machine-readable results (fixture metadata, sink verdicts, metrics snapshots)
+serde_json = "1"
 # CLI (`env` enables #[arg(env = ...)])
 clap = { version = "4", features = ["derive", "env"] }

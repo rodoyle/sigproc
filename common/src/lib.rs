@@ -11,6 +11,8 @@
 //! * [`dsp`] — signal processing primitives. Today the fused multiply-add
 //!   kernels; the channelizer building blocks (NCO mixer, FIR low-pass,
 //!   integer decimator, power estimation, sequence-gap tracking) land in M2.
+//! * [`vectors`] — deterministic AM/DSB test vectors and the VITA49 packet-stream
+//!   writer, shared by the fixture binary, the gates and the tests.
 //!
 //! This crate deliberately has **no UHD dependency**: everything here builds and
 //! tests on any host, including CI without libuhd installed. That is what makes
@@ -18,4 +20,5 @@
 
 pub mod config;
 pub mod dsp;
+pub mod vectors;
 pub mod vita49;

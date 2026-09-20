@@ -76,8 +76,20 @@ pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> V
 
     // Timestamp fields. TSI=Other means ts_int is free-running seconds, and the
     // fractional part is expressed in sample counts (TSF), not sub-seconds.
-    let ts_int = timestamp_secs as u32;
-    let ts_frac = ((timestamp_secs - timestamp_secs.floor()) * sample_rate) as u64;
+    //
+    // Round rather than truncate. `as u64` on a product such as
+    // `0.000048 * 2_000_000` can yield 95.99999999999999 -> 95, a ONE-SAMPLE
+    // timestamp error. Consumers use this counter to detect loss (see
+    // `crate::dsp::gaps`), so a truncation artefact reads as a lost sample --
+    // and the sequence-gap gate asserts that count is zero.
+    let whole_secs = timestamp_secs.floor();
+    let mut ts_int = whole_secs as u32;
+    let mut ts_frac = ((timestamp_secs - whole_secs) * sample_rate).round() as u64;
+    if sample_rate >= 1.0 && ts_frac >= sample_rate as u64 {
+        // The fraction rounded up to a whole second; carry it.
+        ts_frac -= sample_rate as u64;
+        ts_int = ts_int.wrapping_add(1);
+    }
 
     // Whole 32-bit words only — never size this from a count that mixes units.
     let mut buf = vec![0u8; total_words * 4];
@@ -211,7 +223,7 @@ impl Vita49Forwarder {
         let Some(dest) = self.resolved else {
             // No consumer yet — drop but keep capturing.
             self.dropped_since_warn += 1;
-            if self.dropped_since_warn % DROP_WARN_INTERVAL == 0 {
+            if self.dropped_since_warn.is_multiple_of(DROP_WARN_INTERVAL) {
                 log::warn!(
                     "VITA49 destination {} still unresolved; {} packets dropped so far",
                     self.dest,
@@ -263,6 +275,163 @@ impl Vita49Forwarder {
 /// Resolve a `host:port` string to a socket address, returning None on failure.
 fn resolve(dest: &str) -> Option<SocketAddr> {
     dest.to_socket_addrs().ok().and_then(|mut it| it.next())
+}
+
+/// A parsed VITA 49.0 IF Data Packet, borrowing its payload from the buffer.
+///
+/// The wire format is defined by [`build_packet`] in this module and parsed
+/// here, so a change to one side fails the round-trip test immediately rather
+/// than leaving two implementations that disagree in production.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Packet<'a> {
+    /// Packet type field (0x1 = IF Data Packet).
+    pub packet_type: u32,
+    /// Stream identifier word.
+    pub stream_id: u32,
+    /// Timestamp integer seconds (TSI).
+    pub ts_int: u32,
+    /// Timestamp fractional field — sample counts when TSF is sample-count.
+    pub ts_frac: u64,
+    /// Timestamp fractional mode (0x1 = sample count).
+    pub tsf: u32,
+    /// Whole 32-bit words of payload: two sc16 components per word.
+    pub payload: &'a [u8],
+}
+
+impl Packet<'_> {
+    /// Number of complex (I/Q) samples carried.
+    pub fn samples(&self) -> usize {
+        self.payload.len() / 4
+    }
+
+    /// Sample-counter timestamp: TSI seconds scaled by the sample rate plus the
+    /// TSF sample count. This is the stream's continuity signal — see
+    /// [`crate::dsp::gaps::GapTracker`].
+    pub fn sample_counter(&self, sample_rate: f64) -> u64 {
+        (self.ts_int as f64 * sample_rate) as u64 + self.ts_frac
+    }
+
+    /// Payload as interleaved sc16 I/Q (big-endian on the wire).
+    pub fn iq_i16(&self) -> Vec<i16> {
+        self.payload
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .collect()
+    }
+}
+
+/// Why a buffer is not a usable IF Data Packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// Shorter than the 20-byte header.
+    TooShort { got: usize },
+    /// The header's size field disagrees with the bytes actually present.
+    LengthMismatch { declared: usize, actual: usize },
+    /// Only IF Data Packets (type 0x1) are understood by this chain.
+    UnsupportedPacketType(u32),
+    /// A trailer or header extension is present, which this parser does not skip.
+    Trailerized,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::TooShort { got } => {
+                write!(
+                    f,
+                    "packet shorter than the {HEADER_BYTES}-byte header ({got})"
+                )
+            }
+            ParseError::LengthMismatch { declared, actual } => {
+                write!(
+                    f,
+                    "header declares {declared} bytes but {actual} are present"
+                )
+            }
+            ParseError::UnsupportedPacketType(t) => write!(f, "unsupported packet type {t:#x}"),
+            ParseError::Trailerized => write!(f, "trailerized packets are not supported"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Parse exactly one IF Data Packet from `buf`.
+///
+/// Strict by design: the buffer must be exactly one packet. A short read is an
+/// error rather than a truncated packet, because a consumer that silently
+/// accepts a partial payload turns a transport fault into corrupt samples.
+pub fn parse(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
+    if buf.len() < HEADER_BYTES {
+        return Err(ParseError::TooShort { got: buf.len() });
+    }
+    let header = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
+    let packet_type = header >> 28;
+    if packet_type != VITA49_IF_DATA_PACKET {
+        return Err(ParseError::UnsupportedPacketType(packet_type));
+    }
+    if (header >> 24) & 0x3 != 0 {
+        return Err(ParseError::Trailerized);
+    }
+
+    let declared = ((header & 0xFFFF) as usize + 1) * 4;
+    if declared != buf.len() {
+        return Err(ParseError::LengthMismatch {
+            declared,
+            actual: buf.len(),
+        });
+    }
+
+    Ok(Packet {
+        packet_type,
+        stream_id: u32::from_be_bytes(buf[4..8].try_into().expect("4 bytes")),
+        ts_int: u32::from_be_bytes(buf[8..12].try_into().expect("4 bytes")),
+        ts_frac: u64::from_be_bytes(buf[12..20].try_into().expect("8 bytes")),
+        tsf: (header >> 20) & 0x3,
+        payload: &buf[HEADER_BYTES..],
+    })
+}
+
+/// Walks a buffer containing one or more concatenated VITA49 packets (the
+/// fixture file format) or a receive buffer of back-to-back datagrams.
+pub struct PacketCursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> PacketCursor<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        PacketCursor { buf, pos: 0 }
+    }
+
+    /// True when every byte has been consumed as a packet.
+    pub fn is_exhausted(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+
+    /// Parse the next packet, advancing past it. `None` at end of buffer.
+    pub fn next_packet(&mut self) -> Option<Result<Packet<'a>, ParseError>> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let rest = &self.buf[self.pos..];
+        if rest.len() < HEADER_BYTES {
+            self.pos = self.buf.len();
+            return Some(Err(ParseError::TooShort { got: rest.len() }));
+        }
+        let header = u32::from_be_bytes(rest[0..4].try_into().expect("4 bytes"));
+        let declared = ((header & 0xFFFF) as usize + 1) * 4;
+        if declared > rest.len() {
+            self.pos = self.buf.len();
+            return Some(Err(ParseError::LengthMismatch {
+                declared,
+                actual: rest.len(),
+            }));
+        }
+        let (packet_buf, _next) = rest.split_at(declared);
+        self.pos += declared;
+        Some(parse(packet_buf))
+    }
 }
 
 #[cfg(test)]
@@ -356,15 +525,25 @@ mod tests {
         assert_eq!(ts_frac(&carried), 0, "fraction resets on carry");
     }
 
-    /// Consecutive full packets must unwrap to a ~2048-sample step — this is the
-    /// consumer's only loss signal, since sequence fields are not populated.
+    /// Consecutive full packets must unwrap to an exact 2048-sample step — this
+    /// is the consumer's only loss signal, since sequence fields are not
+    /// populated. Exact, not ±1: a one-sample error here is indistinguishable
+    /// from a lost sample downstream.
     #[test]
-    fn consecutive_packets_unwrap_to_a_2048_sample_step() {
-        let a = build_packet(&make_samples(FULL_SAMPLES), 1000.0, SAMPLE_RATE);
-        let b = build_packet(&make_samples(FULL_SAMPLES), 1000.001024, SAMPLE_RATE);
+    fn consecutive_packets_unwrap_to_an_exact_2048_sample_step() {
         let counter = |p: &[u8]| ts_int(p) as u64 * SAMPLE_RATE as u64 + ts_frac(p);
-        let step = counter(&b) as i64 - counter(&a) as i64;
-        assert!((step - 2048).abs() <= 1, "step={step}");
+        let mut previous = counter(&build_packet(
+            &make_samples(FULL_SAMPLES),
+            1000.0,
+            SAMPLE_RATE,
+        ));
+        // Fractional steps chosen to land on awkward floating-point values.
+        for step in 1..200 {
+            let ts = 1000.0 + step as f64 * FULL_SAMPLES as f64 / SAMPLE_RATE;
+            let now = counter(&build_packet(&make_samples(FULL_SAMPLES), ts, SAMPLE_RATE));
+            assert_eq!(now - previous, FULL_SAMPLES as u64, "step {step} (ts {ts})");
+            previous = now;
+        }
     }
 
     #[test]
@@ -409,5 +588,123 @@ mod tests {
 
         assert_eq!(fwd.record_send_drop(), None, "next window starts fresh");
         assert_eq!(fwd.send_dropped, SEND_DROP_WARN_INTERVAL + 1);
+    }
+
+    // ── Parser ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_round_trips_build_packet_exactly() {
+        for n in [0usize, 1, 7, 64, FULL_SAMPLES] {
+            let samples = make_samples(n);
+            let pkt = build_packet(&samples, 1234.5, SAMPLE_RATE);
+            let parsed = parse(&pkt).expect("parses");
+            assert_eq!(parsed.packet_type, VITA49_IF_DATA_PACKET);
+            assert_eq!(parsed.samples(), n);
+            assert_eq!(parsed.ts_int, 1234);
+            assert_eq!(parsed.ts_frac, 1_000_000, "0.5 s in sample counts");
+            assert_eq!(parsed.tsf, VITA49_TSF_SAMPLE_COUNT);
+            assert_eq!(parsed.iq_i16(), samples, "payload round-trips intact");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_short_or_overlong_buffer() {
+        let full = build_packet(&make_samples(16), 0.0, SAMPLE_RATE);
+        assert_eq!(parse(&full[..8]), Err(ParseError::TooShort { got: 8 }));
+
+        let mut overlong = full.clone();
+        overlong.push(0);
+        assert_eq!(
+            parse(&overlong),
+            Err(ParseError::LengthMismatch {
+                declared: full.len(),
+                actual: full.len() + 1
+            })
+        );
+
+        let mut truncated = full;
+        truncated.truncate(truncated.len() - 4);
+        assert!(matches!(
+            parse(&truncated),
+            Err(ParseError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_packet_types_this_chain_does_not_understand() {
+        let mut pkt = build_packet(&make_samples(4), 0.0, SAMPLE_RATE);
+        // Rewrite the type field to a context packet (0x4).
+        let mut header = u32::from_be_bytes(pkt[0..4].try_into().unwrap());
+        header = (header & 0x0FFF_FFFF) | (0x4 << 28);
+        pkt[0..4].copy_from_slice(&header.to_be_bytes());
+        assert_eq!(parse(&pkt), Err(ParseError::UnsupportedPacketType(0x4)));
+    }
+
+    /// A trailer bit means extra words this parser does not skip; accepting it
+    /// would mean treating trailer bytes as samples.
+    #[test]
+    fn parse_refuses_trailerized_packets_rather_than_reading_trailers_as_samples() {
+        let mut pkt = build_packet(&make_samples(4), 0.0, SAMPLE_RATE);
+        let header = u32::from_be_bytes(pkt[0..4].try_into().unwrap());
+        // Set the trailer bit. Written as a plain expression (not `|=`) — an
+        // AST-level linter used in this repo mis-parses the compound-assignment
+        // form on a field of a local as an invalid assignment target.
+        let header = header | (0x1 << 24);
+        pkt[0..4].copy_from_slice(&header.to_be_bytes());
+        assert_eq!(parse(&pkt), Err(ParseError::Trailerized));
+    }
+
+    #[test]
+    fn a_packet_file_is_walked_packet_by_packet() {
+        let packets: Vec<Vec<u8>> = (0..5)
+            .map(|i| {
+                // Timestamps advance by exactly one packet's worth of samples,
+                // as a real capture does.
+                let ts = 100.0 + i as f64 * 32.0 / SAMPLE_RATE;
+                build_packet(&make_samples(32), ts, SAMPLE_RATE)
+            })
+            .collect();
+        let mut file = Vec::new();
+        for p in &packets {
+            file.extend_from_slice(p);
+        }
+
+        let mut cursor = PacketCursor::new(&file);
+        let mut counters = Vec::new();
+        while let Some(next) = cursor.next_packet() {
+            let parsed = next.expect("parses");
+            counters.push(parsed.sample_counter(SAMPLE_RATE));
+        }
+        assert!(cursor.is_exhausted());
+        assert_eq!(counters.len(), 5);
+
+        // A file of 32-sample packets at 2 MS/s advances by 32 samples each time.
+        for (i, pair) in counters.windows(2).enumerate() {
+            assert_eq!(
+                pair[1] - pair[0],
+                32,
+                "packet {i} to {}: sample counter must advance by the payload length",
+                i + 1
+            );
+        }
+        assert_eq!(
+            counters[0],
+            100 * SAMPLE_RATE as u64,
+            "first packet starts at 100 s"
+        );
+    }
+
+    #[test]
+    fn a_truncated_tail_in_a_packet_file_is_reported_not_silently_dropped() {
+        let mut file = build_packet(&make_samples(16), 0.0, SAMPLE_RATE);
+        file.extend_from_slice(&build_packet(&make_samples(16), 0.0, SAMPLE_RATE)[..12]);
+
+        let mut cursor = PacketCursor::new(&file);
+        assert!(cursor.next_packet().expect("first").is_ok());
+        let err = cursor
+            .next_packet()
+            .expect("second")
+            .expect_err("truncated tail must be reported");
+        assert!(matches!(err, ParseError::TooShort { .. }), "{err:?}");
     }
 }
