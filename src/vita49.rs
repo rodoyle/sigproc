@@ -266,7 +266,11 @@ mod tests {
         assert_eq!(header(&pkt), 0x10D00804);
         // Size field is total 32-bit words minus one.
         assert_eq!((header(&pkt) & 0xFFFF) as usize + 1, pkt.len() / 4);
-        assert_eq!(u32::from_be_bytes(pkt[4..8].try_into().unwrap()), 0, "stream id");
+        assert_eq!(
+            u32::from_be_bytes(pkt[4..8].try_into().unwrap()),
+            0,
+            "stream id"
+        );
 
         // Payload round-trips byte-for-byte, big-endian, right after the header.
         for (i, &s) in samples.iter().enumerate() {
@@ -282,8 +286,16 @@ mod tests {
         assert_eq!((h >> 26) & 0x3, 0, "class id absent");
         assert_eq!((h >> 24) & 0x3, 0, "no trailer");
         assert_eq!((h >> 22) & 0x3, VITA49_TSI_OTHER, "free-running time");
-        assert_eq!((h >> 20) & 0x3, VITA49_TSF_SAMPLE_COUNT, "sample-count fraction");
-        assert_eq!((h >> 16) & 0xF, 0, "packet count is 0 today (known, recorded)");
+        assert_eq!(
+            (h >> 20) & 0x3,
+            VITA49_TSF_SAMPLE_COUNT,
+            "sample-count fraction"
+        );
+        assert_eq!(
+            (h >> 16) & 0xF,
+            0,
+            "packet count is 0 today (known, recorded)"
+        );
     }
 
     #[test]
