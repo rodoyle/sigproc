@@ -35,8 +35,24 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/arch: arm64
+      # Keep the consumer off the node running the live B210 capture: it is
+      # light, but the capture node holds a real-time USB stream open.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sigproc
+                topologyKey: kubernetes.io/hostname
       imagePullSecrets:
         - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: sink
           image: ghcr.io/rodoyle/sigproc-sink:latest

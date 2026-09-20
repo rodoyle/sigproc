@@ -69,8 +69,19 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/sigproc-channelizer /usr/local/bin/sigproc-channelizer
 
+# Run as a dedicated non-root user. The Deployment asks for runAsNonRoot, and an
+# image that would run as root cannot satisfy that — kubelet refuses to start it
+# ("container has runAsNonRoot and image will run as root"). Building the user in
+# is the correct fix rather than weakening the pod's security context.
+# UID/GID are fixed so the pod spec can match them, and fsGroup on the pod makes
+# the emptyDir mounts writable by this user.
+RUN groupadd --gid 10001 sigproc \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin sigproc
+
 # Default config path (overridden by the ConfigMap mount in k8s)
 ENV SIGPROC_CONFIG=/etc/sigproc/config.toml
 RUN mkdir -p /etc/sigproc
+
+USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/sigproc-channelizer"]

@@ -40,6 +40,11 @@ spec:
         kubernetes.io/arch: arm64
       imagePullSecrets:
         - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       initContainers:
         - name: fixture
           image: ghcr.io/rodoyle/sigproc-fixture:latest
@@ -63,7 +68,7 @@ spec:
         - name: channelizer-replay
           image: ghcr.io/rodoyle/sigproc-channelizer:latest
           imagePullPolicy: Always
-          # mode and file come from the CLI, overriding the ConfigMap's udp mode:
+          # mode and file come from the CLI, overriding the ConfigMap mode:
           # that is why the gate can run the production image unchanged.
           args:
             - --config=/etc/sigproc/config.toml

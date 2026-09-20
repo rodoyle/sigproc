@@ -47,4 +47,11 @@ RUN cargo build --release --package sigproc-fixture
 # ── Stage 4: Runtime ─────────────────────────────────────────────────────────
 FROM --platform=linux/arm64 debian:trixie-slim
 COPY --from=builder /build/target/release/sigproc-fixture /usr/local/bin/sigproc-fixture
+
+# Non-root by construction: this runs as an init container whose pods set
+# runAsNonRoot, and fsGroup makes the shared fixture emptyDir writable here.
+RUN groupadd --gid 10001 sigproc \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin sigproc
+USER 10001:10001
+
 ENTRYPOINT ["/usr/local/bin/sigproc-fixture"]

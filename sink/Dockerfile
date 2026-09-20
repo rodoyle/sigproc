@@ -46,4 +46,10 @@ RUN cargo build --release --package vita49-sink
 # ── Stage 4: Runtime ─────────────────────────────────────────────────────────
 FROM --platform=linux/arm64 debian:trixie-slim
 COPY --from=builder /build/target/release/vita49-sink /usr/local/bin/vita49-sink
+
+# Non-root by construction: the pods that run this set runAsNonRoot.
+RUN groupadd --gid 10001 sigproc \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin sigproc
+USER 10001:10001
+
 ENTRYPOINT ["/usr/local/bin/vita49-sink"]

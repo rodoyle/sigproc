@@ -41,6 +41,14 @@ spec:
                 topologyKey: kubernetes.io/hostname
       imagePullSecrets:
         - name: ghcr-pull
+      # Non-root user baked into the images (UID/GID 10001). fsGroup makes the
+      # emptyDir mounts group-writable, so the fixture init container can write
+      # the fixture and the channelizer can write its report there.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       # The verification fixture is generated in-cluster by the fixture image
       # into a shared emptyDir: deterministic input with no PVC and no host
       # copy, and the very bytes the end-to-end gate replays.

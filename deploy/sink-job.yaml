@@ -34,6 +34,11 @@ spec:
         kubernetes.io/arch: arm64
       imagePullSecrets:
         - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: sink
           image: ghcr.io/rodoyle/sigproc-sink:latest
