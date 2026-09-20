@@ -11,8 +11,15 @@ name = "sigproc"
 path = "src/main.rs"
 
 [features]
-# UHD + capture support — requires libuhd-dev (enabled by default for Docker build)
-default = ["uhd-support"]
+# UHD + capture support — requires libuhd-dev, so it is NOT a default feature.
+#
+# Why opt-in: cargo-chef resolves and cooks the WHOLE workspace, so a default-on
+# uhd-support made every service image try to build uhd-sys (and fail without
+# libuhd) even though only capture needs it. Opt-in also means
+# `cargo test --workspace` now runs on a host with no UHD installed, which is how
+# the DSP and wire-format suites are meant to be exercised.
+#
+default = []
 uhd-support = ["dep:uhd", "dep:num-complex"]
 
 [dependencies]

@@ -9,8 +9,9 @@
 //! only the UHD capture path.
 //!
 //! The CLI is parsed in **every** build configuration so `--version` works even
-//! where libuhd is absent (the crate is not UHD-dependent for the CLI). Only
-//! the capture path requires the `uhd-support` feature (default).
+//! where libuhd is absent (the crate is not UHD-dependent for the CLI). Only the
+//! capture path requires the `uhd-support` feature, which is opt-in because
+//! libuhd is not present on every build host or in every service image.
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -138,8 +139,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 fn run(_cli: Cli) -> anyhow::Result<()> {
     anyhow::bail!(
         "sigproc v{} built without the uhd-support feature: capture needs libuhd. \
-         Rebuild with --features uhd-support (the default) to stream from a USRP. \
-         The VITA49 framer itself is testable here: cargo test -p sigproc-common",
+         Rebuild with --features uhd-support to stream from a USRP (the capture \
+         image does exactly that). The VITA49 framer is testable without it: \
+         cargo test -p sigproc-common",
         env!("CARGO_PKG_VERSION")
     );
 }

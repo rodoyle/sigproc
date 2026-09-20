@@ -1,5 +1,12 @@
 # Deployment: standing verification consumer.
 #
+# Named `vita49-sink-standing` rather than `vita49-sink` on purpose: the gate's
+# own consumer is a Job named `vita49-sink` (the name the verification contract
+# uses), and a Deployment and a Job of the same name in one namespace is legal
+# but reads badly in `kubectl get all` and in `kubectl logs deploy/...`.
+#
+# The pod label stays `app: vita49-sink` so the vita49-sink Service selects it.
+#
 # The chain has to terminate in something that can say whether the stream is
 # healthy. Until the demod microservice exists, this sink is that terminus: it
 # parses the narrowband VITA49 with the shared parser and logs a verdict line
@@ -12,7 +19,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vita49-sink
+  name: vita49-sink-standing
   namespace: default
   labels:
     app: vita49-sink

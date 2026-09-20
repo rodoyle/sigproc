@@ -97,4 +97,7 @@ spec:
           emptyDir: {}
         - name: config
           configMap:
-            name: sigproc-channelizer-config
+            # The gate's own ConfigMap: it points the narrowband output at
+            # vita49-sink-gate, so the standing sink is not in the path and a
+            # UDP Service cannot split the stream between two consumers.
+            name: sigproc-channelizer-gate-config

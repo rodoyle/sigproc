@@ -1,0 +1,43 @@
+# ConfigMap: channelizer configuration for the end-to-end gate.
+#
+# Identical to sigproc-channelizer-config except for the output destination.
+#
+# Why a second ConfigMap exists at all: a UDP ClusterIP Service load-balances
+# per packet across the pods matching its selector. If the gate's sink shared
+# the standing sink's Service, the narrowband stream would be SPLIT between
+# them and each consumer would see discontinuities in the sample counter — the
+# gate would fail on seq_gaps for a reason that has nothing to do with the
+# pipeline. The gate therefore sends to its own Service, and the standing chain
+# keeps its own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigproc-channelizer-gate-config
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+    type: gate
+data:
+  config.toml: |
+    [rf]
+    center_freq = 915_000_000.0
+    sample_rate = 2_000_000.0
+    rx_gain = 30.0
+    antenna = "RX2"
+    bandwidth = 2_000_000.0
+
+    [forwarding]
+    # The gate's own sink Service, so the standing sink is untouched.
+    vita49_dest_host = "vita49-sink-gate.default.svc.cluster.local"
+    vita49_dest_port = 4920
+
+    [input]
+    # The gate always overrides this on the command line; the value is here so
+    # the file stays a valid, self-describing config.
+    mode = "udp"
+    listen = "0.0.0.0:4810"
+    metrics_listen = "0.0.0.0:8080"
+
+    [channel]
+    offset_hz = 200_000.0
+    output_rate_hz = 50_000.0

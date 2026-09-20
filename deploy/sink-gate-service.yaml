@@ -1,0 +1,22 @@
+# Service: the gate's private sink address.
+#
+# Deliberately separate from vita49-sink: a UDP ClusterIP Service balances per
+# packet across its backends, so sharing one Service between the gate's sink and
+# the standing sink would split the stream and fabricate seq_gaps in both.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vita49-sink-gate
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+    type: gate
+spec:
+  type: ClusterIP
+  selector:
+    app: vita49-sink-gate
+  ports:
+    - name: vita49-in
+      port: 4920
+      targetPort: vita49-in
+      protocol: UDP

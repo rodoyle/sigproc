@@ -1,0 +1,68 @@
+# Job: the gate's assertion consumer.
+#
+# Prints one JSON verdict line for the narrowband stream it received, which is
+# what makes the assertion machine-readable:
+#
+#   kubectl wait --for=condition=complete job/vita49-sink --timeout=300s
+#   kubectl logs job/vita49-sink | grep -q '"ok":true'
+#
+# The pod carries its own label (app: vita49-sink-gate) so it binds to the
+# vita49-sink-gate Service and NOT to the standing sink's address — otherwise a
+# UDP Service would split the stream between two consumers and both would see
+# bogus discontinuities.
+#
+# Apply order matters: this must be listening before the channelizer's replay
+# Job drains its fixture.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vita49-sink
+  namespace: default
+  labels:
+    app: sigproc-channelizer
+    type: gate
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: vita49-sink-gate
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: sink
+          image: ghcr.io/rodoyle/sigproc-sink:latest
+          imagePullPolicy: Always
+          args:
+            # Bounded: exits 3 s after the stream stops, or after 5 minutes.
+            - --listen=0.0.0.0:4920
+            - --expect-rate=50000
+            - --expect-tone=1000
+            - --tone-tolerance=5
+            - --duration=300
+            - --idle-exit-secs=3
+          env:
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: vita49-in
+              containerPort: 4920
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "1000m"

@@ -101,7 +101,15 @@ COPY capture/ capture/
 COPY channelizer/ channelizer/
 COPY fixture/ fixture/
 COPY sink/ sink/
-RUN cargo build --release --package sigproc
+# --features uhd-support is REQUIRED: it is opt-in rather than a default feature,
+# because cargo-chef cooks the whole workspace and a default-on uhd-support made
+# the UHD-free service images try to build uhd-sys without libuhd.
+#
+# Consequence, stated plainly: the cook step above cannot pre-build the UHD
+# dependencies (chef cooks the default feature set), so uhd-sys and the uhd
+# bindings compile in this layer. This image changes rarely, and paying for that
+# once is better than every service image needing libuhd installed.
+RUN cargo build --release --package sigproc --features uhd-support
 
 # ── Stage 4: Runtime ─────────────────────────────────────────────────────────
 FROM --platform=linux/arm64 debian:trixie-slim

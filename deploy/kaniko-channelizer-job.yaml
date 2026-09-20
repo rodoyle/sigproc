@@ -4,19 +4,21 @@
 #   fixture/Dockerfile     -> ghcr.io/rodoyle/sigproc-fixture:latest
 #   sink/Dockerfile        -> ghcr.io/rodoyle/sigproc-sink:latest
 #
-# One Job for all three because they share everything expensive about a kaniko
-# run: the repo clone and the scratch volume. Only the last stage of each build
-# differs, and the dependency-cooking layers are cached in the registry between
-# runs.
+# One Job for all three because they share the expensive parts: the repo clone
+# and the scratch volume. The dependency-cooking layers are cached in the
+# registry between runs.
+#
+# Why these are initContainers: the kaniko executor image is scratch-based and
+# contains only /kaniko/executor — there is no shell in it, so a single
+# `sh -c "... && ... && ..."` container is impossible (it fails with
+# `stat /busybox/sh: no such file or directory`). Init containers run
+# sequentially and share volumes, so each image gets its own kaniko container
+# with the image's own entrypoint and only `args` supplied.
 #
 # The capture image (which DOES need UHD) keeps its own Job:
 # deploy/kaniko-job.yaml. Splitting them means a change to the channelizer
 # can no longer invalidate or break the image that must keep the radio
 # streaming.
-#
-# Runs in the `build` namespace with the same SMB-scratch arrangement as
-# kaniko-job.yaml — see that file for the CIFS/symlink and credential-staging
-# caveats, which apply identically here.
 #
 # Apply:  kubectl apply -f deploy/kaniko-channelizer-job.yaml
 # Follow: kubectl -n build logs job/kaniko-build-sigproc-chain -f
@@ -28,7 +30,7 @@
 # Deviation from the verification contract, recorded deliberately: the contract
 # named the Job `kaniko-sigproc-channelizer` and covered one image. One Job now
 # builds the three UHD-free images, because the clone and the scratch volume are
-# the expensive shared parts, so the gate command is
+# the shared expensive parts, so the gate command is
 # `kubectl wait --for=condition=complete
 # job/kaniko-build-sigproc-chain` instead.
 apiVersion: batch/v1
@@ -46,6 +48,19 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/arch: arm64
+      # Prefer NOT the node running the live B210 capture: a cargo-chef cook is
+      # heavy and the capture node is holding a real-time USB stream, and the
+      # SMB-backed scratch PVC has no node affinity, so any arm64 node can host
+      # this build.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["rpi-four-2"]
       restartPolicy: Never
       initContainers:
         # ── Clone the sigproc repo ──────────────────────────────────────
@@ -62,6 +77,9 @@ spec:
             - name: workspace
               mountPath: /workspace
         # ── Stage registry credentials on the writable SMB scratch ─────
+        # Kaniko rewrites $KANIKO_DIR/.docker, which a read-only secret mount
+        # cannot satisfy ("chown ... read-only file system"), so the credentials
+        # are copied onto the writable volume instead of mounted into kaniko.
         - name: stage-kaniko-creds
           image: busybox:latest
           command:
@@ -78,43 +96,60 @@ spec:
               readOnly: true
             - name: kaniko-scratch
               mountPath: /kaniko-scratch
-      containers:
-        - name: kaniko
+        # ── The three builds, sequentially, sharing clone + scratch ─────
+        - name: build-channelizer
           image: gcr.io/kaniko-project/executor:latest
-          # Three sequential builds in one pod: the executor is a binary, and
-          # the clone plus scratch volume are worth sharing.
-          command:
-            - /busybox/sh
-            - -c
           args:
-            - |
-              set -eu
-              COMMON="--context=dir:///workspace --cache=true --cache-ttl=24h \
-              --snapshot-mode=redo --kaniko-dir=/kaniko-scratch"
-
-              build() {
-                echo "=== kaniko: $2 (from $1) ==="
-                # shellcheck disable=SC2086
-                /kaniko/executor $COMMON --dockerfile="$1" --destination="$2"
-              }
-
-              build channelizer/Dockerfile \
-                ghcr.io/rodoyle/sigproc-channelizer:latest
-              build fixture/Dockerfile ghcr.io/rodoyle/sigproc-fixture:latest
-              build sink/Dockerfile ghcr.io/rodoyle/sigproc-sink:latest
-              echo "=== all three images pushed ==="
+            - --context=dir:///workspace
+            - --dockerfile=channelizer/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-channelizer:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
           volumeMounts:
             - name: workspace
               mountPath: /workspace
             - name: kaniko-scratch
               mountPath: /kaniko-scratch
-          resources:
-            requests:
-              memory: "1Gi"
-              cpu: "1000m"
-            limits:
-              memory: "4Gi"
-              cpu: "3000m"
+        - name: build-fixture
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=fixture/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-fixture:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        - name: build-sink
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=sink/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-sink:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+      containers:
+        # A pod needs a main container; the work is all in the init containers.
+        - name: report
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - echo "all three images built and pushed"
       volumes:
         - name: workspace
           emptyDir: {}
