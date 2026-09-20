@@ -50,15 +50,53 @@ pub fn estimate_frequency(
     min_hz: f64,
     max_hz: f64,
 ) -> Option<f64> {
+    estimate_frequency_opts(signal, sample_rate, min_hz, max_hz, true)
+}
+
+/// Like [`estimate_frequency`], but **keeps the DC term**.
+///
+/// The distinction matters for a channelized signal: a carrier sitting exactly at
+/// the channel centre is a DC term, so removing DC first leaves only the
+/// modulation sidebands and reports {±modulating tone} as if the channel were
+/// off-centre. Keeping DC answers the question "where is the signal in my
+/// channel" — 0 Hz means centred.
+///
+/// The trade-off is deliberate and worth stating: a channel that carries only a
+/// DC offset and no real signal will also report ~0 Hz. That is why the
+/// DC-removed form remains the default for modulation-tone measurement, and why
+/// the two are separate names rather than a boolean at the call site.
+pub fn estimate_frequency_keeping_dc(
+    signal: &[Iq],
+    sample_rate: f64,
+    min_hz: f64,
+    max_hz: f64,
+) -> Option<f64> {
+    estimate_frequency_opts(signal, sample_rate, min_hz, max_hz, false)
+}
+
+fn estimate_frequency_opts(
+    signal: &[Iq],
+    sample_rate: f64,
+    min_hz: f64,
+    max_hz: f64,
+    remove_dc: bool,
+) -> Option<f64> {
     let n = signal.len();
     if n < 8 || sample_rate <= 0.0 || max_hz <= min_hz {
         return None;
     }
 
     // Mean removal: a DC term is a real peak at bin 0 and would otherwise
-    // dominate the search when the band starts near DC.
-    let mean_i = signal.iter().map(|s| s.i as f64).sum::<f64>() / n as f64;
-    let mean_q = signal.iter().map(|s| s.q as f64).sum::<f64>() / n as f64;
+    // dominate the search when the band starts near DC. Skipped when the caller
+    // wants to see the carrier itself.
+    let (mean_i, mean_q) = if remove_dc {
+        (
+            signal.iter().map(|s| s.i as f64).sum::<f64>() / n as f64,
+            signal.iter().map(|s| s.q as f64).sum::<f64>() / n as f64,
+        )
+    } else {
+        (0.0, 0.0)
+    };
 
     // Zero-pad to at least twice the length: halves the bin width, and the
     // parabolic interpolation below then resolves well below it.
@@ -136,7 +174,27 @@ pub fn estimate_frequency(
         (0.5 * (y0 - y2) / denom).clamp(-1.0, 1.0)
     };
 
-    Some((best as f64 + delta) * bin_hz)
+    let signed = (best as f64 + delta) * bin_hz;
+
+    // A **real** input (q identically zero — an envelope, an AM carrier) has both
+    // +f and -f present at equal magnitude, so the sign is not information: it is
+    // whichever side the scan met first. Report the magnitude instead, so the same
+    // measurement cannot come back as -700 Hz on one run and +700 Hz on another
+    // depending on scan order. Complex input keeps its sign, which is real
+    // information there (which side of the channel centre a signal sits on).
+    let is_real = signal.iter().all(|s| s.q == 0.0);
+    Some(if is_real { signed.abs() } else { signed })
+}
+
+/// Convenience used by the sink and the gate scripts: recover the modulation tone
+/// from the *envelope* of a channelized signal.
+///
+/// The envelope is what an AM detector recovers, so this is the measurement that
+/// proves the signal survived channelization with its modulation intact.
+/// DC-removed ([`estimate_frequency`]) because the envelope of an AM signal is
+/// "carrier + modulation", and the carrier term is the large DC component.
+pub fn envelope_tone_hz(signal: &[Iq], sample_rate: f64, min_hz: f64, max_hz: f64) -> Option<f64> {
+    estimate_frequency(&super::iq::envelope(signal), sample_rate, min_hz, max_hz)
 }
 
 #[cfg(test)]
@@ -187,6 +245,48 @@ mod tests {
         assert!((got - (-2000.0)).abs() < 0.5, "got {got} Hz");
         // And it is absent from the positive band.
         assert_eq!(estimate_frequency(&sig, rate, 100.0, 5000.0), None);
+    }
+
+    #[test]
+    fn keeping_dc_reports_a_centred_carrier_as_zero_instead_of_a_sideband() {
+        // 50% AM on a carrier at the centre of the band: its DC term is the
+        // carrier, and the ±1 kHz components are sidebands.
+        let rate = 50_000.0;
+        let iq: Vec<Iq> = (0..20_000)
+            .map(|k| {
+                let t = k as f64 / rate;
+                let amp = 1.0 + 0.5 * (2.0 * PI * 1000.0 * t).cos();
+                Iq::new(amp as f32, 0.0)
+            })
+            .collect();
+
+        // Default (DC removed): the strongest thing left is a sideband.
+        let sideband = estimate_frequency(&iq, rate, -5_000.0, 5_000.0).expect("sideband");
+        assert!(
+            (sideband.abs() - 1000.0).abs() < 2.0,
+            "expected a ~1 kHz sideband, got {sideband}"
+        );
+
+        // Keeping DC: the channel is centred, so the answer is ~0.
+        let centred = estimate_frequency_keeping_dc(&iq, rate, -5_000.0, 5_000.0).expect("carrier");
+        assert!(centred.abs() < 2.0, "expected ~0 Hz, got {centred}");
+    }
+
+    #[test]
+    fn keeping_dc_still_finds_a_real_tone_that_is_off_centre() {
+        let rate = 50_000.0;
+        // A tone 700 Hz above the channel centre, with a small DC term: the tone
+        // must still win.
+        let iq: Vec<Iq> = (0..20_000)
+            .map(|k| {
+                let t = k as f64 / rate;
+                let dc = 0.05;
+                let tone = (2.0 * PI * 700.0 * t).cos();
+                Iq::new((dc + tone) as f32, 0.0)
+            })
+            .collect();
+        let got = estimate_frequency_keeping_dc(&iq, rate, -5_000.0, 5_000.0).expect("tone");
+        assert!((got - 700.0).abs() < 2.0, "got {got}");
     }
 
     #[test]

@@ -636,6 +636,8 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "serde",
+ "serde_json",
  "sigproc-common",
 ]
 
@@ -819,6 +821,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "serde_json",
  "sigproc-common",
 ]
 

@@ -1,0 +1,44 @@
+# Local end-to-end gate configuration for the channelizer (no cluster needed).
+#
+#   mkdir -p target/gate
+#   sigproc-fixture      --am --tone 1000 --offset 200000 --seconds 1 \
+#                        --out target/gate/am.vita49
+#   vita49-sink          --listen 127.0.0.1:4920 --expect-rate 50000 --expect-tone 1000 \
+#                        --json target/gate/sink.json &
+#   sigproc-channelizer  --config test/channelizer-replay.toml \
+#                        --report target/gate/chan-report.json
+#
+# Paths here are RELATIVE on purpose. An absolute `/tmp/...` in this file is not
+# translated by the shell (only command-line arguments are), so on a Windows host
+# Rust would look for a literal `/tmp` that does not exist — a portability trap
+# that has nothing to do with the pipeline being tested.
+#
+# Everything is loopback: the wideband input is a fixture file replayed through
+# the SAME parse path UDP uses, and the narrowband output goes to a real UDP
+# socket so the sink exercises the real transport.
+
+[rf]
+# Describes the wideband input stream the channelizer is consuming.
+center_freq = 915_000_000.0
+sample_rate = 2_000_000.0
+rx_gain = 30.0
+antenna = "RX2"
+bandwidth = 2_000_000.0
+
+[forwarding]
+# Narrowband output destination: the sink in this configuration.
+vita49_dest_host = "127.0.0.1"
+vita49_dest_port = 4920
+
+[input]
+mode = "replay"
+file = "target/gate/am.vita49"
+realtime = false
+listen = "127.0.0.1:4810"
+metrics_listen = "127.0.0.1:8080"
+
+[channel]
+# 915 MHz + 200 kHz, decimated to 50 kS/s: 2 MS/s / 40 is a whole number, and
+# 40 factors into 10 x 4 so no stage needs an unaffordable filter.
+offset_hz = 200_000.0
+output_rate_hz = 50_000.0

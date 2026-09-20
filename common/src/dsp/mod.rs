@@ -31,4 +31,4 @@ pub use fma::{
 pub use gaps::{GapMarker, GapTracker};
 pub use iq::{envelope, iq_to_sc16, mean_power, power_dbfs, sc16_to_iq, Iq, SC16_FULL_SCALE};
 pub use nco::Nco;
-pub use tone::estimate_frequency;
+pub use tone::{envelope_tone_hz, estimate_frequency, estimate_frequency_keeping_dc};

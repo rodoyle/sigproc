@@ -23,6 +23,10 @@ pub struct Config {
     pub device: DeviceConfig,
     pub rf: RfConfig,
     pub forwarding: ForwardingConfig,
+    /// Where this service's input comes from. Optional: capture reads a USRP, not
+    /// a UDP stream, so it has no use for the section.
+    #[serde(default)]
+    pub input: InputConfig,
     /// Channel plan — required by the channelizer, absent for capture.
     #[serde(default)]
     pub channel: Option<ChannelConfig>,
@@ -65,6 +69,83 @@ fn default_antenna() -> String {
 
 fn default_stopband_db() -> f64 {
     80.0
+}
+
+fn default_listen() -> String {
+    "0.0.0.0:4810".to_string()
+}
+
+/// Where a service's samples come from (`[input]` in config.toml).
+///
+/// The same two shapes serve production and verification: `udp` for the real
+/// stream, `replay` for a fixture file. The code path after the VITA49 receive
+/// boundary is identical, so the DSP under test is never mocked — only the packet
+/// source changes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InputConfig {
+    /// UDP address to bind for incoming VITA49 packets (`udp` mode).
+    #[serde(default = "default_listen")]
+    pub listen: String,
+    /// `udp` or `replay`.
+    #[serde(default = "default_input_mode")]
+    pub mode: String,
+    /// Fixture file to replay (`replay` mode).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// In `replay` mode, pace packets at the nominal sample rate instead of
+    /// draining the file as fast as possible.
+    #[serde(default)]
+    pub realtime: bool,
+    /// HTTP address for `/metrics` and `/healthz`.
+    #[serde(default = "default_metrics_listen")]
+    pub metrics_listen: String,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        InputConfig {
+            listen: default_listen(),
+            mode: default_input_mode(),
+            file: None,
+            realtime: false,
+            metrics_listen: default_metrics_listen(),
+        }
+    }
+}
+
+fn default_input_mode() -> String {
+    "udp".to_string()
+}
+
+fn default_metrics_listen() -> String {
+    "0.0.0.0:8080".to_string()
+}
+
+impl InputConfig {
+    /// Validate the section, without pulling in the CLI's enum type.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self.mode.as_str() {
+            "udp" => {}
+            "replay" => {
+                if self.file.as_deref().unwrap_or("").is_empty() {
+                    anyhow::bail!("[input] mode = \"replay\" needs a file = \"...\"");
+                }
+            }
+            other => anyhow::bail!("[input] mode must be \"udp\" or \"replay\", got {other:?}"),
+        }
+        self.listen.parse::<std::net::SocketAddr>().map_err(|e| {
+            anyhow::anyhow!("[input] listen {:?} is not host:port: {e}", self.listen)
+        })?;
+        self.metrics_listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "[input] metrics_listen {:?} is not host:port: {e}",
+                    self.metrics_listen
+                )
+            })?;
+        Ok(())
+    }
 }
 
 fn default_max_taps() -> usize {
@@ -194,6 +275,7 @@ impl Config {
         if self.forwarding.vita49_dest_port == 0 {
             anyhow::bail!("vita49_dest_port must be non-zero");
         }
+        self.input.validate()?;
         if let Some(channel) = &self.channel {
             channel.validate(self.rf.sample_rate)?;
         }
@@ -331,5 +413,50 @@ mod tests {
             .expect_err("zero centre frequency")
             .to_string();
         assert!(err.contains("center_freq must be positive"), "{err}");
+    }
+
+    /// Capture reads a USRP, so a config with no `[input]` section must default
+    /// to something usable rather than fail.
+    #[test]
+    fn input_defaults_are_applied_when_the_section_is_absent() {
+        let cfg: Config = toml::from_str(CAPTURE_TOML).expect("parses");
+        assert_eq!(cfg.input.mode, "udp");
+        assert_eq!(cfg.input.listen, "0.0.0.0:4810");
+        assert_eq!(cfg.input.metrics_listen, "0.0.0.0:8080");
+        assert!(cfg.input.file.is_none());
+        cfg.input.validate().expect("defaults are valid");
+    }
+
+    /// `replay` without a file is a config that cannot work; catching it at load
+    /// beats a pod that starts and then blocks on nothing.
+    #[test]
+    fn replay_mode_without_a_file_is_rejected() {
+        let toml_text =
+            format!("{CHANNELIZER_TOML}\n        [input]\n        mode = \"replay\"\n    ");
+        let cfg: Config = toml::from_str(&toml_text).expect("parses");
+        let err = cfg.validate().expect_err("replay needs a file").to_string();
+        assert!(err.contains("replay"), "{err}");
+        assert!(err.contains("file"), "must name the missing key: {err}");
+    }
+
+    #[test]
+    fn an_unknown_input_mode_is_rejected_with_both_valid_values_named() {
+        let toml_text =
+            format!("{CHANNELIZER_TOML}\n        [input]\n        mode = \"carrier-pigeon\"\n    ");
+        let cfg: Config = toml::from_str(&toml_text).expect("parses");
+        let err = cfg.validate().expect_err("unknown mode").to_string();
+        assert!(err.contains("udp"), "{err}");
+        assert!(err.contains("replay"), "{err}");
+    }
+
+    #[test]
+    fn a_non_host_port_listen_address_is_rejected_with_the_key_named() {
+        let toml_text = format!(
+            "{CHANNELIZER_TOML}\n        [input]\n        listen = \"not-an-address\"\n    "
+        );
+        let cfg: Config = toml::from_str(&toml_text).expect("parses");
+        let err = cfg.validate().expect_err("bad address").to_string();
+        assert!(err.contains("listen"), "{err}");
+        assert!(err.contains("host:port"), "{err}");
     }
 }

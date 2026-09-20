@@ -128,6 +128,11 @@ pub struct Vita49Forwarder {
     send_dropped: u64,
     /// Backpressured drops since the last such warning was logged.
     send_dropped_since_warn: u64,
+    /// Monotonic total of every packet dropped for any reason (unresolved
+    /// destination or backpressure). Kept separately from the per-window
+    /// counters because a Prometheus counter must never go down, and
+    /// `dropped_since_warn` is deliberately reset once the destination resolves.
+    total_dropped: u64,
 }
 
 impl Vita49Forwarder {
@@ -164,6 +169,7 @@ impl Vita49Forwarder {
             dropped_since_warn: 0,
             send_dropped: 0,
             send_dropped_since_warn: 0,
+            total_dropped: 0,
         })
     }
 
@@ -193,7 +199,6 @@ impl Vita49Forwarder {
     }
 
     /// Count one packet lost to send-buffer backpressure.
-    ///
     /// Returns `Some(count)` for the just-finished reporting window when the
     /// periodic warn threshold was reached (the since-last report counter is
     /// reset here), or `None` when this drop is not yet reportable. Split out
@@ -201,6 +206,7 @@ impl Vita49Forwarder {
     /// a real `WouldBlock` from the OS.
     fn record_send_drop(&mut self) -> Option<u64> {
         self.send_dropped += 1;
+        self.total_dropped += 1;
         self.send_dropped_since_warn += 1;
         if self.send_dropped_since_warn >= SEND_DROP_WARN_INTERVAL {
             let window = self.send_dropped_since_warn;
@@ -223,6 +229,7 @@ impl Vita49Forwarder {
         let Some(dest) = self.resolved else {
             // No consumer yet — drop but keep capturing.
             self.dropped_since_warn += 1;
+            self.total_dropped += 1;
             if self.dropped_since_warn.is_multiple_of(DROP_WARN_INTERVAL) {
                 log::warn!(
                     "VITA49 destination {} still unresolved; {} packets dropped so far",
@@ -275,6 +282,16 @@ impl Vita49Forwarder {
 /// Resolve a `host:port` string to a socket address, returning None on failure.
 fn resolve(dest: &str) -> Option<SocketAddr> {
     dest.to_socket_addrs().ok().and_then(|mut it| it.next())
+}
+
+impl Vita49Forwarder {
+    /// Every packet dropped so far, for any reason.
+    ///
+    /// Monotonic: a rate or gap assertion taken from this value cannot be
+    /// distorted by the internal warning-window counters being reset.
+    pub fn dropped_packets(&self) -> u64 {
+        self.total_dropped
+    }
 }
 
 /// A parsed VITA 49.0 IF Data Packet, borrowing its payload from the buffer.
@@ -394,6 +411,13 @@ pub fn parse(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
 
 /// Walks a buffer containing one or more concatenated VITA49 packets (the
 /// fixture file format) or a receive buffer of back-to-back datagrams.
+///
+/// **A framing error ends the walk.** VITA49 has no sync word, so the size field
+/// is the only thing that says where the next packet starts; after a corrupt
+/// record, resynchronising would mean guessing. The error is reported once and the
+/// cursor stops. This is why a corrupt record in a *file* truncates the run,
+/// while over UDP the same corruption costs exactly one datagram: datagrams are
+/// independently framed and the receiver simply reads the next one.
 pub struct PacketCursor<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -407,6 +431,34 @@ impl<'a> PacketCursor<'a> {
     /// True when every byte has been consumed as a packet.
     pub fn is_exhausted(&self) -> bool {
         self.pos >= self.buf.len()
+    }
+
+    /// Raw bytes of the next packet, advancing past it. `None` at end of buffer.
+    ///
+    /// Lets a replayer feed the **exact** bytes it read into the same [`parse`]
+    /// path a UDP receiver uses, instead of re-deriving the header and risking
+    /// two framers that disagree.
+    pub fn next_slice(&mut self) -> Option<Result<&'a [u8], ParseError>> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let rest = &self.buf[self.pos..];
+        if rest.len() < HEADER_BYTES {
+            self.pos = self.buf.len();
+            return Some(Err(ParseError::TooShort { got: rest.len() }));
+        }
+        let header = u32::from_be_bytes(rest[0..4].try_into().expect("4 bytes"));
+        let declared = ((header & 0xFFFF) as usize + 1) * 4;
+        if declared > rest.len() {
+            self.pos = self.buf.len();
+            return Some(Err(ParseError::LengthMismatch {
+                declared,
+                actual: rest.len(),
+            }));
+        }
+        let (packet_buf, _next) = rest.split_at(declared);
+        self.pos += declared;
+        Some(Ok(packet_buf))
     }
 
     /// Parse the next packet, advancing past it. `None` at end of buffer.
@@ -692,6 +744,20 @@ mod tests {
             100 * SAMPLE_RATE as u64,
             "first packet starts at 100 s"
         );
+    }
+
+    #[test]
+    fn next_slice_returns_the_exact_packet_bytes() {
+        let a = build_packet(&make_samples(8), 1.0, SAMPLE_RATE);
+        let b = build_packet(&make_samples(16), 2.0, SAMPLE_RATE);
+        let mut file = a.clone();
+        file.extend_from_slice(&b);
+
+        let mut cursor = PacketCursor::new(&file);
+        assert_eq!(cursor.next_slice().expect("a").expect("ok"), &a[..]);
+        assert_eq!(cursor.next_slice().expect("b").expect("ok"), &b[..]);
+        assert!(cursor.next_slice().is_none());
+        assert!(cursor.is_exhausted());
     }
 
     #[test]
