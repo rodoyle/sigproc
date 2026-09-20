@@ -23,6 +23,14 @@ const RESOLVE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 /// How many dropped packets between "still unresolved" warnings.
 const DROP_WARN_INTERVAL: u64 = 1000;
 
+/// How many backpressured (would-block) packets between transport-loss warnings.
+///
+/// The socket is non-blocking with the OS default send buffer, so a congested
+/// consumer causes `send_to` to return `WouldBlock` and the packet to be
+/// dropped silently. This interval bounds how loudly we report that loss
+/// without flooding the log during exactly the congestion we are measuring.
+const SEND_DROP_WARN_INTERVAL: u64 = 1000;
+
 /// Number of 32-bit words in the VRT header + timestamp fields: the packet header
 /// (word 0), stream ID (word 1), ts integer seconds (word 2) and the 64-bit
 /// fractional timestamp (words 3-4).
@@ -104,6 +112,10 @@ pub struct Vita49Forwarder {
     packet_count: u32,
     /// Packets dropped since the last unresolved warning was logged.
     dropped_since_warn: u64,
+    /// Total packets dropped because the send buffer was full (backpressure).
+    send_dropped: u64,
+    /// Backpressured drops since the last such warning was logged.
+    send_dropped_since_warn: u64,
 }
 
 impl Vita49Forwarder {
@@ -138,6 +150,8 @@ impl Vita49Forwarder {
             last_resolve_attempt: Some(Instant::now()),
             packet_count: 0,
             dropped_since_warn: 0,
+            send_dropped: 0,
+            send_dropped_since_warn: 0,
         })
     }
 
@@ -164,6 +178,24 @@ impl Vita49Forwarder {
             self.resolved = Some(addr);
             self.dropped_since_warn = 0;
         }
+    }
+
+    /// Count one packet lost to send-buffer backpressure.
+    ///
+    /// Returns `Some(count)` for the just-finished reporting window when the
+    /// periodic warn threshold was reached (the since-last report counter is
+    /// reset here), or `None` when this drop is not yet reportable. Split out
+    /// from [`Self::send`] so the accounting is testable without having to force
+    /// a real `WouldBlock` from the OS.
+    fn record_send_drop(&mut self) -> Option<u64> {
+        self.send_dropped += 1;
+        self.send_dropped_since_warn += 1;
+        if self.send_dropped_since_warn >= SEND_DROP_WARN_INTERVAL {
+            let window = self.send_dropped_since_warn;
+            self.send_dropped_since_warn = 0;
+            return Some(window);
+        }
+        None
     }
 
     /// Pack IQ samples into a VITA49 IF Data Packet and send via UDP.
@@ -204,10 +236,24 @@ impl Vita49Forwarder {
             }
             Ok(n) => log::warn!("VITA49 partial send: {}/{} bytes", n, buf.len()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Non-blocking socket + default SO_SNDBUF: a congested or
+                // stalled consumer lands here. Count it, because the packet is
+                // genuinely lost, and surface it periodically rather than at
+                // debug level only.
                 log::debug!(
-                    "VITA49 send would block, dropping packet #{}",
-                    self.packet_count
+                    "VITA49 send would block, dropping packet #{} ({} dropped so far)",
+                    self.packet_count,
+                    self.send_dropped
                 );
+                if let Some(window) = self.record_send_drop() {
+                    log::warn!(
+                        "VITA49 backpressure: {} packets dropped this window, \
+                         {} total (consumer {} not draining)",
+                        window,
+                        self.send_dropped,
+                        dest
+                    );
+                }
             }
             Err(e) => log::error!("VITA49 send error to {}: {}", dest, e),
         }
@@ -333,5 +379,35 @@ mod tests {
         let pkt = build_packet(&odd, 0.0, SAMPLE_RATE);
         assert_eq!(pkt.len(), HEADER_BYTES + 2 * 4);
         assert_eq!(pkt.len() % 4, 0);
+    }
+
+    /// Transport loss is only observable through this counter when the OS send
+    /// buffer is full, so assert the accounting directly: the report fires every
+    /// `SEND_DROP_WARN_INTERVAL` drops, not once per drop (which would flood the
+    /// log precisely during the congestion being reported).
+    #[test]
+    fn backpressure_drops_are_counted_and_reported_periodically() {
+        let mut fwd = Vita49Forwarder::new("127.0.0.1", 4820, 0).unwrap();
+        assert_eq!(fwd.send_dropped, 0);
+
+        let reports = (1..SEND_DROP_WARN_INTERVAL)
+            .filter(|_| fwd.record_send_drop().is_some())
+            .count();
+        assert_eq!(reports, 0, "must not warn before the interval is reached");
+        assert_eq!(fwd.send_dropped, SEND_DROP_WARN_INTERVAL - 1);
+
+        assert_eq!(
+            fwd.record_send_drop(),
+            Some(SEND_DROP_WARN_INTERVAL),
+            "interval-th drop reports its window size"
+        );
+        assert_eq!(fwd.send_dropped, SEND_DROP_WARN_INTERVAL);
+        assert_eq!(
+            fwd.send_dropped_since_warn, 0,
+            "since-last-report counter resets so the next window is independent"
+        );
+
+        assert_eq!(fwd.record_send_drop(), None, "next window starts fresh");
+        assert_eq!(fwd.send_dropped, SEND_DROP_WARN_INTERVAL + 1);
     }
 }
