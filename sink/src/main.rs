@@ -127,6 +127,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         match socket.recv_from(&mut buf) {
             Ok((n, _from)) => {
                 match vita49::parse(&buf[..n]) {
+                    // Stream metadata, not samples: valid, nothing to measure.
+                    Err(vita49::ParseError::ContextPacket) => {}
                     Ok(packet) => {
                         packets += 1;
                         samples += packet.samples() as u64;

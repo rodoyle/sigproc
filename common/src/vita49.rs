@@ -11,10 +11,24 @@
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// VITA 49.0 IF Data Packet header constants.
+/// VITA 49.0 packet header constants.
 const VITA49_IF_DATA_PACKET: u32 = 0x1;
+/// IF Context Packet (with stream ID).
+const VITA49_IF_CONTEXT_PACKET: u32 = 0x4;
 const VITA49_TSI_OTHER: u32 = 0x3; // free-running timestamp
 const VITA49_TSF_SAMPLE_COUNT: u32 = 0x1;
+
+/// Default number of complex samples per IF Data Packet.
+///
+/// 5 header words + 360 payload words = 1460 bytes, which fits inside one
+/// 1500-byte Ethernet MTU with IPv4 (20) + UDP (8) headers to spare. The UHD
+/// receive buffer size (2048 samples) must NOT be the packetization unit: at
+/// 8212 bytes a packet is fragmented into six IP fragments and the loss of any
+/// one of them discards the whole packet.
+pub const DEFAULT_SAMPLES_PER_PACKET: usize = 360;
+
+/// Emit a context packet at least this often (in data packets).
+pub const CONTEXT_EVERY_N_DATA_PACKETS: u32 = 256;
 
 /// How long to wait between DNS re-resolution attempts when the destination
 /// is unresolved.
@@ -39,39 +53,56 @@ const HEADER_WORDS: usize = 5;
 /// Bytes occupied by [`HEADER_WORDS`] (5 x 4).
 pub const HEADER_BYTES: usize = HEADER_WORDS * 4;
 
+/// Build one complete VITA 49.0 IF Data Packet with stream ID 0 and packet
+/// count 0. Convenience wrapper over [`build_data_packet`] for fixtures/tests.
+pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> Vec<u8> {
+    build_data_packet(samples, timestamp_secs, sample_rate, 0, 0)
+}
+
 /// Build one complete VITA 49.0 IF Data Packet from interleaved sc16 IQ samples.
 ///
 /// `samples` is interleaved I/Q as `[I0, Q0, I1, Q1, ...]` i16; a trailing odd
 /// element (an I with no Q) is ignored so the payload is always whole words.
 /// `timestamp_secs` is the UHD time in seconds (full + fractional).
+/// `stream_id` is serialized into word 1; `packet_count` (modulo 16) into
+/// header bits 19-16 so receivers can detect lost datagrams.
 ///
 /// Packet layout, big-endian 32-bit words (all offsets in bytes):
 ///
 /// ```text
 ///   0..4    word 0   packet header
-///   4..8    word 1   stream ID (0 today — see the module notes)
+///   4..8    word 1   stream ID
 ///   8..12   word 2   timestamp integer seconds (u32)
 ///   12..20  words 3-4  timestamp fractional, sample-count format (u64)
 ///   20..    payload  sc16 interleaved I/Q, two i16 per 32-bit word
 /// ```
 ///
-/// The size field (header bits 15-0) is `total_words - 1` where a word is a real
-/// 32-bit word, so a full 2048-sample packet is 2053 words = **8212 bytes** with
-/// header `0x10D00804` and the datagram is 4-byte aligned as VITA 49 requires.
+/// The size field (header bits 15-0) is the **total** number of 32-bit words in
+/// the packet including the header, per VITA 49.0 (and as SoapyVITA49 and
+/// Geon's libVRT read it). A full 2048-sample packet is 2053 words = 8212 bytes
+/// with header `0x10D00805`.
 ///
-/// (An earlier revision counted each *i16* as a word: it declared 4101 words,
-/// allocated 8202 bytes, then wrote the payload past the end of that buffer and
-/// panicked on the first packet ever actually sent.)
-pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> Vec<u8> {
+/// (An earlier revision encoded `total_words - 1`, under-declaring every packet
+/// by one word; a still earlier one counted each *i16* as a word and wrote past
+/// the end of its buffer.)
+pub fn build_data_packet(
+    samples: &[i16],
+    timestamp_secs: f64,
+    sample_rate: f64,
+    stream_id: u32,
+    packet_count: u8,
+) -> Vec<u8> {
     let num_samples = samples.len() / 2; // complete I/Q pairs
     let payload_words = num_samples; // two sc16 components (I,Q) per 32-bit word
     let total_words = HEADER_WORDS + payload_words;
-    let packet_size_words = (total_words - 1) as u16; // VITA49: total words minus 1
+    assert!(total_words <= u16::MAX as usize, "packet exceeds 65535 words");
+    let packet_size_words = total_words as u16; // VITA49: total words incl. header
 
     // Header word: packet type | TSI (free-running) | TSF (sample counts) | size
     let header: u32 = (VITA49_IF_DATA_PACKET << 28)
         | (VITA49_TSI_OTHER << 22)
         | (VITA49_TSF_SAMPLE_COUNT << 20)
+        | (((packet_count & 0xF) as u32) << 16)
         | (packet_size_words as u32);
 
     // Timestamp fields. TSI=Other means ts_int is free-running seconds, and the
@@ -95,7 +126,7 @@ pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> V
     let mut buf = vec![0u8; total_words * 4];
 
     buf[0..4].copy_from_slice(&header.to_be_bytes()); // word 0
-    buf[4..8].copy_from_slice(&0u32.to_be_bytes()); // word 1 (stream id: 0 today)
+    buf[4..8].copy_from_slice(&stream_id.to_be_bytes()); // word 1
     buf[8..12].copy_from_slice(&ts_int.to_be_bytes()); // word 2
     buf[12..HEADER_BYTES].copy_from_slice(&ts_frac.to_be_bytes()); // words 3-4
 
@@ -108,11 +139,118 @@ pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> V
     buf
 }
 
-/// Builder for VITA49 IF Data Packets.
+/// Stream metadata carried in IF Context Packets.
 ///
-/// Each packet carries:
+/// SoapyVITA49 (and other VRT consumers) derive sample rate, tuned frequency and
+/// payload format from context, not from the data stream, so every forwarder
+/// emits one of these periodically and immediately after a configuration change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamContext {
+    /// RF reference (tuned centre) frequency in Hz.
+    pub rf_freq_hz: f64,
+    /// Sample rate in Hz.
+    pub sample_rate_hz: f64,
+    /// Analog/digital bandwidth in Hz.
+    pub bandwidth_hz: f64,
+    /// Receiver gain in dB (stage 1).
+    pub gain_db: f64,
+}
+
+/// Context Indicator Field 0 bits (VITA 49.0 §7.1.5.1).
+const CIF0_CHANGE_INDICATOR: u32 = 1 << 31;
+const CIF0_BANDWIDTH: u32 = 1 << 29;
+const CIF0_RF_REF_FREQ: u32 = 1 << 27;
+const CIF0_GAIN: u32 = 1 << 23;
+const CIF0_SAMPLE_RATE: u32 = 1 << 21;
+const CIF0_DATA_PAYLOAD_FORMAT: u32 = 1 << 15;
+
+/// Context packet size: header(1) + stream id(1) + tsi(1) + tsf(2) + CIF0(1)
+/// + bandwidth(2) + rf freq(2) + gain(1) + sample rate(2) + payload format(2).
+pub const CONTEXT_PACKET_WORDS: usize = 15;
+/// Bytes of a context packet built by [`build_context_packet`].
+pub const CONTEXT_PACKET_BYTES: usize = CONTEXT_PACKET_WORDS * 4;
+
+/// Hz as a 64-bit two's-complement fixed-point value with a 20-bit radix point.
+fn hz_q20(hz: f64) -> u64 {
+    ((hz * (1u64 << 20) as f64).round() as i64) as u64
+}
+
+/// Data Packet Payload Format field describing our sc16 I/Q payload
+/// (VITA 49.0 §7.1.5.18): packing method = link-efficient (0), real/complex =
+/// complex cartesian (01), data item format = signed fixed-point (00000),
+/// item packing field size = 16 bits (0b001111), data item size = 16 bits
+/// (0b001111), repeat count and vector size = 1 (encoded 0).
+fn sc16_payload_format() -> u64 {
+    let word0: u32 = (0b01 << 29) | (15 << 6) | 15;
+    (word0 as u64) << 32
+}
+
+/// Build one IF Context Packet (type 0x4) for `stream_id`.
+///
+/// `change` sets the Context Field Change Indicator; set it on the first packet
+/// after any of the fields changed, clear it on periodic repeats.
+pub fn build_context_packet(
+    ctx: &StreamContext,
+    timestamp_secs: f64,
+    stream_id: u32,
+    packet_count: u8,
+    change: bool,
+) -> Vec<u8> {
+    let header: u32 = (VITA49_IF_CONTEXT_PACKET << 28)
+        | (VITA49_TSI_OTHER << 22)
+        | (VITA49_TSF_SAMPLE_COUNT << 20)
+        | (((packet_count & 0xF) as u32) << 16)
+        | (CONTEXT_PACKET_WORDS as u32);
+    let (ts_int, ts_frac) = split_timestamp(timestamp_secs, ctx.sample_rate_hz);
+    let mut cif0 = CIF0_BANDWIDTH
+        | CIF0_RF_REF_FREQ
+        | CIF0_GAIN
+        | CIF0_SAMPLE_RATE
+        | CIF0_DATA_PAYLOAD_FORMAT;
+    if change {
+        cif0 |= CIF0_CHANGE_INDICATOR;
+    }
+    // Gain: two 16-bit Q7 fields, stage 2 (upper) = 0, stage 1 (lower) = gain.
+    let gain_q7 = ((ctx.gain_db * 128.0).round() as i16) as u16 as u32;
+
+    let mut buf = Vec::with_capacity(CONTEXT_PACKET_BYTES);
+    buf.extend_from_slice(&header.to_be_bytes());
+    buf.extend_from_slice(&stream_id.to_be_bytes());
+    buf.extend_from_slice(&ts_int.to_be_bytes());
+    buf.extend_from_slice(&ts_frac.to_be_bytes());
+    buf.extend_from_slice(&cif0.to_be_bytes());
+    buf.extend_from_slice(&hz_q20(ctx.bandwidth_hz).to_be_bytes());
+    buf.extend_from_slice(&hz_q20(ctx.rf_freq_hz).to_be_bytes());
+    buf.extend_from_slice(&gain_q7.to_be_bytes());
+    buf.extend_from_slice(&hz_q20(ctx.sample_rate_hz).to_be_bytes());
+    buf.extend_from_slice(&sc16_payload_format().to_be_bytes());
+    debug_assert_eq!(buf.len(), CONTEXT_PACKET_BYTES);
+    buf
+}
+
+/// Split a UHD time into VRT TSI seconds and TSF sample count, rounding (not
+/// truncating) and carrying a fraction that rounds up to a full second.
+fn split_timestamp(timestamp_secs: f64, sample_rate: f64) -> (u32, u64) {
+    let whole_secs = timestamp_secs.floor();
+    let mut ts_int = whole_secs as u32;
+    let mut ts_frac = ((timestamp_secs - whole_secs) * sample_rate).round() as u64;
+    if sample_rate >= 1.0 && ts_frac >= sample_rate as u64 {
+        ts_frac -= sample_rate as u64;
+        ts_int = ts_int.wrapping_add(1);
+    }
+    (ts_int, ts_frac)
+}
+/// Builder for VITA49 IF Data (and Context) Packets.
+///
+/// Each data packet carries:
 /// - 20-byte VRT header + timestamp fields (5 x 32-bit words)
 /// - Payload: IQ samples as interleaved `[I0, Q0, I1, Q1, ...]` i16 pairs (sc16)
+///
+/// Incoming sample batches (e.g. a 2048-sample UHD receive buffer) are
+/// re-cut into packets of at most `samples_per_packet` complex samples so a
+/// datagram fits in one Ethernet frame. A context packet is interleaved every
+/// [`CONTEXT_EVERY_N_DATA_PACKETS`] data packets and whenever
+/// [`Vita49Forwarder::set_context`] changes the stream metadata.
 pub struct Vita49Forwarder {
     socket: UdpSocket,
     /// Destination as given, e.g. `waterfall-service:4820`.
@@ -121,7 +259,23 @@ pub struct Vita49Forwarder {
     resolved: Option<SocketAddr>,
     /// When we last attempted resolution (None = never).
     last_resolve_attempt: Option<Instant>,
+    /// Stream identifier written into every data and context packet.
+    stream_id: u32,
+    /// Total data packets built (diagnostics only).
     packet_count: u32,
+    /// VRT 4-bit data-packet sequence counter (modulo 16).
+    data_seq: u8,
+    /// VRT 4-bit context-packet sequence counter (modulo 16); context packets
+    /// form their own sequence in VITA 49.0.
+    context_seq: u8,
+    /// Data packets sent since the last context packet.
+    data_since_context: u32,
+    /// Current stream metadata; `None` until the caller provides it.
+    context: Option<StreamContext>,
+    /// A context change is pending and must be announced before more data.
+    context_dirty: bool,
+    /// Maximum complex samples per outgoing data packet.
+    samples_per_packet: usize,
     /// Packets dropped since the last unresolved warning was logged.
     dropped_since_warn: u64,
     /// Total packets dropped because the send buffer was full (backpressure).
@@ -165,7 +319,14 @@ impl Vita49Forwarder {
             dest,
             resolved,
             last_resolve_attempt: Some(Instant::now()),
+            stream_id,
             packet_count: 0,
+            data_seq: 0,
+            context_seq: 0,
+            data_since_context: 0,
+            context: None,
+            context_dirty: false,
+            samples_per_packet: DEFAULT_SAMPLES_PER_PACKET,
             dropped_since_warn: 0,
             send_dropped: 0,
             send_dropped_since_warn: 0,
@@ -216,15 +377,96 @@ impl Vita49Forwarder {
         None
     }
 
-    /// Pack IQ samples into a VITA49 IF Data Packet and send via UDP.
+    /// Set (or update) the stream metadata announced in context packets.
     ///
-    /// `samples` is interleaved I/Q as `[I0, Q0, I1, Q1, ...]` i16.
-    /// `timestamp_secs` is the UHD time in seconds (full + fractional).
+    /// A changed context is announced with the Change Indicator set before the
+    /// next data packet; an unchanged one is a no-op.
+    pub fn set_context(&mut self, ctx: StreamContext) {
+        if self.context != Some(ctx) {
+            self.context = Some(ctx);
+            self.context_dirty = true;
+        }
+    }
+
+    /// Override the maximum complex samples per data packet (default
+    /// [`DEFAULT_SAMPLES_PER_PACKET`]).
+    pub fn set_samples_per_packet(&mut self, n: usize) {
+        assert!(n > 0, "samples_per_packet must be positive");
+        self.samples_per_packet = n;
+    }
+
+    /// Maximum complex samples per outgoing data packet.
+    pub fn samples_per_packet(&self) -> usize {
+        self.samples_per_packet
+    }
+
+    /// Stream ID written into every packet.
+    pub fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
+
+    /// Pack IQ samples into VITA49 IF Data Packets and send via UDP.
     ///
-    /// Framing lives in [`build_packet`]; this method only owns transport.
+    /// `samples` is interleaved I/Q as `[I0, Q0, I1, Q1, ...]` i16 and may be
+    /// any length: it is re-cut into packets of at most `samples_per_packet`
+    /// complex samples, each stamped with its own first-sample time.
+    /// `timestamp_secs` is the UHD time of the first sample in seconds.
+    ///
+    /// Framing lives in [`build_data_packet`] / [`build_context_packet`]; this
+    /// method owns sequencing, context cadence and transport.
     pub fn send(&mut self, samples: &[i16], timestamp_secs: f64, sample_rate: f64) {
-        self.packet_count = self.packet_count.wrapping_add(1);
         self.resolve_if_needed();
+
+        let pairs = samples.len() / 2;
+        let mut first = 0usize;
+        while first < pairs {
+            let last = (first + self.samples_per_packet).min(pairs);
+            let ts = timestamp_secs + first as f64 / sample_rate;
+            self.send_one(&samples[first * 2..last * 2], ts, sample_rate);
+            first = last;
+        }
+    }
+
+    /// Emit the context packet when it is due (changed, first ever, or the
+    /// periodic cadence elapsed).
+    fn maybe_send_context(&mut self, timestamp_secs: f64, dest: SocketAddr) {
+        let Some(ctx) = self.context else {
+            return;
+        };
+        let periodic = self.data_since_context >= CONTEXT_EVERY_N_DATA_PACKETS;
+        if !(self.context_dirty || periodic) {
+            return;
+        }
+        let pkt = build_context_packet(
+            &ctx,
+            timestamp_secs,
+            self.stream_id,
+            self.context_seq,
+            self.context_dirty,
+        );
+        self.context_seq = (self.context_seq + 1) & 0xF;
+        self.data_since_context = 0;
+        self.context_dirty = false;
+        match self.socket.send_to(&pkt, dest) {
+            Ok(_) => log::debug!(
+                "VITA49 context: f={} Hz fs={} Hz bw={} Hz gain={} dB -> {}",
+                ctx.rf_freq_hz,
+                ctx.sample_rate_hz,
+                ctx.bandwidth_hz,
+                ctx.gain_db,
+                dest
+            ),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Lost to backpressure; re-announce with the next data packet.
+                self.context_dirty = true;
+            }
+            Err(e) => log::error!("VITA49 context send error to {}: {}", dest, e),
+        }
+    }
+
+    /// Frame and send exactly one data packet (at most `samples_per_packet`).
+    fn send_one(&mut self, samples: &[i16], timestamp_secs: f64, sample_rate: f64) {
+        self.packet_count = self.packet_count.wrapping_add(1);
 
         let Some(dest) = self.resolved else {
             // No consumer yet — drop but keep capturing.
@@ -240,14 +482,22 @@ impl Vita49Forwarder {
             return;
         };
 
+        self.maybe_send_context(timestamp_secs, dest);
+
         let num_samples = samples.len() / 2; // I/Q pairs
-        let buf = build_packet(samples, timestamp_secs, sample_rate);
+        let seq = self.data_seq;
+        let buf = build_data_packet(samples, timestamp_secs, sample_rate, self.stream_id, seq);
+        // The sequence number advances even when the datagram is lost: a
+        // receiver that checks continuity must see the hole.
+        self.data_seq = (self.data_seq + 1) & 0xF;
+        self.data_since_context += 1;
 
         match self.socket.send_to(&buf, dest) {
             Ok(n) if n == buf.len() => {
                 log::debug!(
-                    "VITA49 pkt #{}: {} samples, {} bytes -> {}",
+                    "VITA49 pkt #{} seq {}: {} samples, {} bytes -> {}",
                     self.packet_count,
+                    seq,
                     num_samples,
                     n,
                     dest
@@ -305,6 +555,8 @@ pub struct Packet<'a> {
     pub packet_type: u32,
     /// Stream identifier word.
     pub stream_id: u32,
+    /// 4-bit VRT packet count (header bits 19-16), modulo 16 per stream.
+    pub packet_count: u8,
     /// Timestamp integer seconds (TSI).
     pub ts_int: u32,
     /// Timestamp fractional field — sample counts when TSF is sample-count.
@@ -344,6 +596,9 @@ pub enum ParseError {
     TooShort { got: usize },
     /// The header's size field disagrees with the bytes actually present.
     LengthMismatch { declared: usize, actual: usize },
+    /// An IF Context Packet (type 0x4): valid VRT, carries no samples. Consumers
+    /// that only want IQ should skip it silently rather than count it malformed.
+    ContextPacket,
     /// Only IF Data Packets (type 0x1) are understood by this chain.
     UnsupportedPacketType(u32),
     /// A trailer or header extension is present, which this parser does not skip.
@@ -365,6 +620,7 @@ impl std::fmt::Display for ParseError {
                     "header declares {declared} bytes but {actual} are present"
                 )
             }
+            ParseError::ContextPacket => write!(f, "IF context packet (no samples)"),
             ParseError::UnsupportedPacketType(t) => write!(f, "unsupported packet type {t:#x}"),
             ParseError::Trailerized => write!(f, "trailerized packets are not supported"),
         }
@@ -384,6 +640,9 @@ pub fn parse(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
     }
     let header = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
     let packet_type = header >> 28;
+    if packet_type == VITA49_IF_CONTEXT_PACKET {
+        return Err(ParseError::ContextPacket);
+    }
     if packet_type != VITA49_IF_DATA_PACKET {
         return Err(ParseError::UnsupportedPacketType(packet_type));
     }
@@ -391,7 +650,7 @@ pub fn parse(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
         return Err(ParseError::Trailerized);
     }
 
-    let declared = ((header & 0xFFFF) as usize + 1) * 4;
+    let declared = (header & 0xFFFF) as usize * 4;
     if declared != buf.len() {
         return Err(ParseError::LengthMismatch {
             declared,
@@ -402,6 +661,7 @@ pub fn parse(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
     Ok(Packet {
         packet_type,
         stream_id: u32::from_be_bytes(buf[4..8].try_into().expect("4 bytes")),
+        packet_count: ((header >> 16) & 0xF) as u8,
         ts_int: u32::from_be_bytes(buf[8..12].try_into().expect("4 bytes")),
         ts_frac: u64::from_be_bytes(buf[12..20].try_into().expect("8 bytes")),
         tsf: (header >> 20) & 0x3,
@@ -448,7 +708,7 @@ impl<'a> PacketCursor<'a> {
             return Some(Err(ParseError::TooShort { got: rest.len() }));
         }
         let header = u32::from_be_bytes(rest[0..4].try_into().expect("4 bytes"));
-        let declared = ((header & 0xFFFF) as usize + 1) * 4;
+        let declared = (header & 0xFFFF) as usize * 4;
         if declared > rest.len() {
             self.pos = self.buf.len();
             return Some(Err(ParseError::LengthMismatch {
@@ -472,7 +732,7 @@ impl<'a> PacketCursor<'a> {
             return Some(Err(ParseError::TooShort { got: rest.len() }));
         }
         let header = u32::from_be_bytes(rest[0..4].try_into().expect("4 bytes"));
-        let declared = ((header & 0xFFFF) as usize + 1) * 4;
+        let declared = (header & 0xFFFF) as usize * 4;
         if declared > rest.len() {
             self.pos = self.buf.len();
             return Some(Err(ParseError::LengthMismatch {
@@ -530,9 +790,9 @@ mod tests {
         let pkt = build_packet(&samples, 12.0, SAMPLE_RATE);
 
         assert_eq!(pkt.len(), 8212, "5 header words + 2048 payload words");
-        assert_eq!(header(&pkt), 0x10D00804);
-        // Size field is total 32-bit words minus one.
-        assert_eq!((header(&pkt) & 0xFFFF) as usize + 1, pkt.len() / 4);
+        assert_eq!(header(&pkt), 0x10D00805);
+        // Size field is total 32-bit words including the header.
+        assert_eq!((header(&pkt) & 0xFFFF) as usize, pkt.len() / 4);
         assert_eq!(
             u32::from_be_bytes(pkt[4..8].try_into().unwrap()),
             0,
@@ -561,7 +821,7 @@ mod tests {
         assert_eq!(
             (h >> 16) & 0xF,
             0,
-            "packet count is 0 today (known, recorded)"
+            "packet count is 0 for build_packet (the compat wrapper)"
         );
     }
 
@@ -602,7 +862,7 @@ mod tests {
     fn short_packets_are_framed_from_their_own_size() {
         let pkt = build_packet(&make_samples(3), 0.0, SAMPLE_RATE);
         assert_eq!(pkt.len(), HEADER_BYTES + 3 * 4);
-        assert_eq!(header(&pkt) & 0xFFFF, 7, "(5 + 3) - 1");
+        assert_eq!(header(&pkt) & 0xFFFF, 8, "5 header + 3 payload words");
 
         // A trailing I with no Q cannot form a word: drop it, keep the packet valid.
         let mut odd = make_samples(2);
@@ -685,11 +945,114 @@ mod tests {
     #[test]
     fn parse_rejects_packet_types_this_chain_does_not_understand() {
         let mut pkt = build_packet(&make_samples(4), 0.0, SAMPLE_RATE);
-        // Rewrite the type field to a context packet (0x4).
+        // Rewrite the type field to an extension data packet (0x3).
         let mut header = u32::from_be_bytes(pkt[0..4].try_into().unwrap());
-        header = (header & 0x0FFF_FFFF) | (0x4 << 28);
+        header = (header & 0x0FFF_FFFF) | (0x3 << 28);
         pkt[0..4].copy_from_slice(&header.to_be_bytes());
-        assert_eq!(parse(&pkt), Err(ParseError::UnsupportedPacketType(0x4)));
+        assert_eq!(parse(&pkt), Err(ParseError::UnsupportedPacketType(0x3)));
+    }
+
+    // ── Stream ID / sequence / context ──────────────────────────────────────
+
+    #[test]
+    fn stream_id_and_packet_count_are_serialized() {
+        let pkt = build_data_packet(&make_samples(4), 0.0, SAMPLE_RATE, 0xDEAD_BEEF, 0x1B);
+        let parsed = parse(&pkt).expect("parses");
+        assert_eq!(parsed.stream_id, 0xDEAD_BEEF);
+        assert_eq!(parsed.packet_count, 0xB, "count is modulo 16");
+        assert_eq!((header(&pkt) >> 16) & 0xF, 0xB);
+    }
+
+    #[test]
+    fn context_packet_is_well_formed_and_decodes() {
+        let ctx = StreamContext {
+            rf_freq_hz: 915_000_000.0,
+            sample_rate_hz: SAMPLE_RATE,
+            bandwidth_hz: 2_000_000.0,
+            gain_db: 30.5,
+        };
+        let pkt = build_context_packet(&ctx, 12.5, 0x42, 3, true);
+        assert_eq!(pkt.len(), CONTEXT_PACKET_BYTES);
+        let h = header(&pkt);
+        assert_eq!(h >> 28, VITA49_IF_CONTEXT_PACKET);
+        assert_eq!((h >> 16) & 0xF, 3);
+        assert_eq!((h & 0xFFFF) as usize, CONTEXT_PACKET_WORDS);
+        assert_eq!(u32::from_be_bytes(pkt[4..8].try_into().unwrap()), 0x42);
+        assert_eq!(ts_int(&pkt), 12);
+        assert_eq!(ts_frac(&pkt), 1_000_000);
+
+        let cif0 = u32::from_be_bytes(pkt[20..24].try_into().unwrap());
+        assert_eq!(
+            cif0,
+            CIF0_CHANGE_INDICATOR
+                | CIF0_BANDWIDTH
+                | CIF0_RF_REF_FREQ
+                | CIF0_GAIN
+                | CIF0_SAMPLE_RATE
+                | CIF0_DATA_PAYLOAD_FORMAT
+        );
+        let q20 = |off: usize| u64::from_be_bytes(pkt[off..off + 8].try_into().unwrap());
+        assert_eq!(q20(24) as f64 / (1u64 << 20) as f64, 2_000_000.0, "bandwidth");
+        assert_eq!(q20(32) as f64 / (1u64 << 20) as f64, 915_000_000.0, "rf freq");
+        let gain = u32::from_be_bytes(pkt[40..44].try_into().unwrap());
+        assert_eq!((gain & 0xFFFF) as i16 as f64 / 128.0, 30.5, "stage-1 gain Q7");
+        assert_eq!(q20(44) as f64 / (1u64 << 20) as f64, SAMPLE_RATE, "sample rate");
+        let fmt = u32::from_be_bytes(pkt[52..56].try_into().unwrap());
+        assert_eq!((fmt >> 29) & 0x3, 0b01, "complex cartesian");
+        assert_eq!((fmt >> 6) & 0x3F, 15, "16-bit item packing");
+        assert_eq!(fmt & 0x3F, 15, "16-bit data item");
+
+        // Data-only consumers skip it as a distinct, non-malformed outcome.
+        assert_eq!(parse(&pkt), Err(ParseError::ContextPacket));
+        let repeat = build_context_packet(&ctx, 12.5, 0x42, 4, false);
+        let cif0 = u32::from_be_bytes(repeat[20..24].try_into().unwrap());
+        assert_eq!(cif0 & CIF0_CHANGE_INDICATOR, 0, "periodic repeat: no change flag");
+    }
+
+    /// A 2048-sample UHD buffer must leave as MTU-sized datagrams with a
+    /// continuous modulo-16 sequence and per-packet timestamps that chain exactly,
+    /// and the context packet must precede the first data packet.
+    #[test]
+    fn forwarder_repacketizes_sequences_and_announces_context() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let port = rx.local_addr().unwrap().port();
+        let mut fwd = Vita49Forwarder::new("127.0.0.1", port, 0xABCD).unwrap();
+        fwd.set_context(StreamContext {
+            rf_freq_hz: 915e6,
+            sample_rate_hz: SAMPLE_RATE,
+            bandwidth_hz: 2e6,
+            gain_db: 30.0,
+        });
+
+        let batch = make_samples(FULL_SAMPLES);
+        fwd.send(&batch, 1000.0, SAMPLE_RATE);
+        fwd.send(&batch, 1000.0 + FULL_SAMPLES as f64 / SAMPLE_RATE, SAMPLE_RATE);
+
+        let expected_data = 2 * FULL_SAMPLES.div_ceil(DEFAULT_SAMPLES_PER_PACKET);
+        let mut buf = vec![0u8; 65536];
+        let mut datagrams = Vec::new();
+        for _ in 0..expected_data + 1 {
+            let n = rx.recv(&mut buf).expect("datagram");
+            datagrams.push(buf[..n].to_vec());
+        }
+
+        assert_eq!(parse(&datagrams[0]), Err(ParseError::ContextPacket), "context first");
+        assert_eq!(datagrams[0].len(), CONTEXT_PACKET_BYTES);
+
+        let mut expected_counter = 1000 * SAMPLE_RATE as u64;
+        let mut total = 0usize;
+        for (i, d) in datagrams[1..].iter().enumerate() {
+            assert!(d.len() <= 1472, "datagram {i} is {} bytes: exceeds 1500-byte MTU", d.len());
+            let p = parse(d).expect("data packet");
+            assert_eq!(p.stream_id, 0xABCD);
+            assert_eq!(p.packet_count as usize, i % 16, "sequence continuity at {i}");
+            assert_eq!(p.sample_counter(SAMPLE_RATE), expected_counter, "timestamp chain at {i}");
+            expected_counter += p.samples() as u64;
+            total += p.samples();
+        }
+        assert_eq!(total, 2 * FULL_SAMPLES, "every sample forwarded exactly once");
+        assert_eq!(fwd.dropped_packets(), 0);
     }
 
     /// A trailer bit means extra words this parser does not skip; accepting it

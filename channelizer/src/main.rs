@@ -26,7 +26,7 @@ use clap::{Parser, ValueEnum};
 use sigproc_channelizer::{ChannelizerService, Report, ServiceConfig};
 use sigproc_common::config::Config;
 use sigproc_common::metrics::{spawn_http, Metrics};
-use sigproc_common::vita49::{PacketCursor, Vita49Forwarder};
+use sigproc_common::vita49::{PacketCursor, StreamContext, Vita49Forwarder};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -159,15 +159,26 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     )?;
 
     // Downstream destination for the narrowband stream.
-    let forwarder = Vita49Forwarder::new(
+    // Stream ID: the narrowband channel's absolute centre frequency in kHz,
+    // so it differs from the wideband stream and from other channelizers.
+    let channel_freq_hz = cfg.rf.center_freq + channel.offset_hz;
+    let stream_id = (channel_freq_hz / 1000.0).round() as u32;
+    let mut forwarder = Vita49Forwarder::new(
         &cfg.forwarding.vita49_dest_host,
         cfg.forwarding.vita49_dest_port,
-        0,
+        stream_id,
     )?;
+    forwarder.set_context(StreamContext {
+        rf_freq_hz: channel_freq_hz,
+        sample_rate_hz: channel.output_rate_hz,
+        bandwidth_hz: 2.0 * channel.passband(),
+        gain_db: cfg.rf.rx_gain,
+    });
     log::info!(
-        "narrowband output -> {}:{}",
+        "narrowband output -> {}:{} (stream_id=0x{:08x})",
         cfg.forwarding.vita49_dest_host,
-        cfg.forwarding.vita49_dest_port
+        cfg.forwarding.vita49_dest_port,
+        stream_id
     );
 
     let mut service = ChannelizerService::new(plan, service_cfg, forwarder, Arc::clone(&metrics));
@@ -229,7 +240,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             log::info!("listening for wideband VITA49 on {listen}");
 
             // Receive buffers sized for the largest VITA49 datagram this chain
-            // produces (2048-sample packets are 8212 bytes) with headroom.
+            // could produce (a 65535-word VRT packet) — far above the MTU-sized
+            // datagrams the capture emits today.
             let mut buf = vec![0u8; 65_536];
             loop {
                 match socket.recv_from(&mut buf) {

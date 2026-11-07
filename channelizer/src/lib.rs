@@ -245,6 +245,8 @@ impl<S: OutputSink> ChannelizerService<S> {
     pub fn process_datagram(&mut self, buf: &[u8]) -> PacketOutcome {
         let packet = match vita49::parse(buf) {
             Ok(p) => p,
+            // Context packets carry stream metadata, not samples: valid, skipped.
+            Err(vita49::ParseError::ContextPacket) => return PacketOutcome::default(),
             Err(e) => {
                 // Counted, not fatal: one corrupt datagram must not close a
                 // channel that is otherwise live.

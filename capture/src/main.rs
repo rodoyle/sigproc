@@ -112,8 +112,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         cfg.forwarding.vita49_dest_port,
         stream_id,
     )?;
+    // Context packets let SoapyVITA49-style consumers learn tuning, rate and
+    // payload format from the stream itself. Sent before the first data packet
+    // and periodically thereafter; a retune would call set_context again.
+    forwarder.set_context(vita49::StreamContext {
+        rf_freq_hz: cfg.rf.center_freq,
+        sample_rate_hz: sample_rate,
+        bandwidth_hz: cfg.rf.bandwidth,
+        gain_db: cfg.rf.rx_gain,
+    });
 
-    log::info!("capture loop started: stream_id=0x{:08x}", stream_id);
+    log::info!(
+        "capture loop started: stream_id=0x{:08x}, {} samples/packet",
+        stream_id,
+        forwarder.samples_per_packet()
+    );
 
     // ── Main capture loop ────────────────────────────────────────────────
     loop {
