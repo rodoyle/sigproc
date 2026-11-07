@@ -63,7 +63,7 @@ FROM --platform=linux/arm64 debian:trixie-slim
 # The service speaks UDP and serves metrics over HTTP; it needs no runtime libs
 # beyond glibc and CA roots.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
