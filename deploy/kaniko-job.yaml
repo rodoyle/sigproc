@@ -30,13 +30,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: kaniko-build-sigproc
+  name: kaniko-build-sigproc-host-vrt-v1
   namespace: build
   labels:
     app: sigproc
     type: kaniko-build
 spec:
   backoffLimit: 0
+  activeDeadlineSeconds: 3600
   ttlSecondsAfterFinished: 3600
   template:
     spec:
@@ -48,11 +49,17 @@ spec:
         # ── Clone the sigproc repo ──────────────────────────────────────
         - name: git-clone
           image: alpine/git:latest
+          env:
+            - name: GIT_REF
+              value: master # override with exact source commit when building
           command:
             - sh
             - -c
             - |
+              set -eu
               git clone https://github.com/rodoyle/sigproc.git /workspace
+              git -C /workspace checkout --detach "$GIT_REF"
+              git -C /workspace rev-parse HEAD
               echo "Cloned sigproc repo to /workspace"
           volumeMounts:
             - name: workspace
@@ -81,7 +88,7 @@ spec:
           args:
             - --context=dir:///workspace
             - --dockerfile=capture/Dockerfile
-            - --destination=ghcr.io/rodoyle/sigproc:latest
+            - --destination=ghcr.io/rodoyle/sigproc:host-vrt-20261107-v1
             - --cache=true
             - --cache-ttl=24h
             # Faster snapshots: only re-hash mtime-changed files

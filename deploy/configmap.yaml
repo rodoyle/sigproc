@@ -30,3 +30,14 @@ data:
     # Waterfall VITA49 UDP consumer destination
     vita49_dest_host = "waterfall-service.default.svc.cluster.local"
     vita49_dest_port = 4820
+
+    # Additional LAN stream; retain the unicast waterfall destination above.
+    [forwarding.multicast]
+    group = "239.255.49.2"
+    port = 4820
+    interface = "192.168.0.55" # rpi-four-2 LAN address
+    ttl = 1
+
+    [control]
+    enabled = false # do not expose radio control on the LAN by default
+    stream_id = 1

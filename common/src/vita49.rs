@@ -95,7 +95,10 @@ pub fn build_data_packet(
     let num_samples = samples.len() / 2; // complete I/Q pairs
     let payload_words = num_samples; // two sc16 components (I,Q) per 32-bit word
     let total_words = HEADER_WORDS + payload_words;
-    assert!(total_words <= u16::MAX as usize, "packet exceeds 65535 words");
+    assert!(
+        total_words <= u16::MAX as usize,
+        "packet exceeds 65535 words"
+    );
     let packet_size_words = total_words as u16; // VITA49: total words incl. header
 
     // Header word: packet type | TSI (free-running) | TSF (sample counts) | size
@@ -202,11 +205,8 @@ pub fn build_context_packet(
         | (((packet_count & 0xF) as u32) << 16)
         | (CONTEXT_PACKET_WORDS as u32);
     let (ts_int, ts_frac) = split_timestamp(timestamp_secs, ctx.sample_rate_hz);
-    let mut cif0 = CIF0_BANDWIDTH
-        | CIF0_RF_REF_FREQ
-        | CIF0_GAIN
-        | CIF0_SAMPLE_RATE
-        | CIF0_DATA_PAYLOAD_FORMAT;
+    let mut cif0 =
+        CIF0_BANDWIDTH | CIF0_RF_REF_FREQ | CIF0_GAIN | CIF0_SAMPLE_RATE | CIF0_DATA_PAYLOAD_FORMAT;
     if change {
         cif0 |= CIF0_CHANGE_INDICATOR;
     }
@@ -332,6 +332,17 @@ impl Vita49Forwarder {
             send_dropped_since_warn: 0,
             total_dropped: 0,
         })
+    }
+
+    /// Select the LAN interface explicitly for IPv4 multicast, without changing
+    /// the destination or binding the separate control endpoint.
+    pub fn configure_multicast(&self, interface: std::net::Ipv4Addr, ttl: u32) -> anyhow::Result<()> {
+        anyhow::ensure!((1..=255).contains(&ttl), "invalid multicast TTL");
+        let socket = socket2::SockRef::from(&self.socket);
+        socket.set_multicast_if_v4(&interface)?;
+        self.socket.set_multicast_ttl_v4(ttl)?;
+        self.socket.set_multicast_loop_v4(true)?;
+        Ok(())
     }
 
     /// Re-attempt resolution if the destination is currently unresolved and
@@ -583,7 +594,9 @@ impl Packet<'_> {
     /// Payload as interleaved sc16 I/Q (big-endian on the wire).
     pub fn iq_i16(&self) -> Vec<i16> {
         self.payload
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_be_bytes([c[0], c[1]]))
             .collect()
     }
@@ -746,9 +759,25 @@ impl<'a> PacketCursor<'a> {
     }
 }
 
+/// VITA 49.2 bounded command profile; framing is shared with capture's control socket.
+#[path = "vita49_control.rs"]
+mod control;
+pub use control::{hand_command, ControlBackend, ControlUpdate, Controllee};
+#[cfg(test)]
+use control::{parse_command, CAM_ACK_APPLIED, CAM_ACK_REJECTED, CIF0_REFERENCE_LEVEL};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl ControlBackend for StreamContext {
+        fn apply_and_readback(&mut self, update: ControlUpdate) -> anyhow::Result<StreamContext> {
+            if let Some(value) = update.rf_freq_hz { self.rf_freq_hz = value; }
+            if let Some(value) = update.sample_rate_hz { self.sample_rate_hz = value; }
+            if let Some(value) = update.bandwidth_hz { self.bandwidth_hz = value; }
+            if let Some(value) = update.gain_db { self.gain_db = value; }
+            Ok(*self)
+        }
+    }
 
     const SAMPLE_RATE: f64 = 2_000_000.0;
     const FULL_SAMPLES: usize = 2048;
@@ -992,11 +1021,27 @@ mod tests {
                 | CIF0_DATA_PAYLOAD_FORMAT
         );
         let q20 = |off: usize| u64::from_be_bytes(pkt[off..off + 8].try_into().unwrap());
-        assert_eq!(q20(24) as f64 / (1u64 << 20) as f64, 2_000_000.0, "bandwidth");
-        assert_eq!(q20(32) as f64 / (1u64 << 20) as f64, 915_000_000.0, "rf freq");
+        assert_eq!(
+            q20(24) as f64 / (1u64 << 20) as f64,
+            2_000_000.0,
+            "bandwidth"
+        );
+        assert_eq!(
+            q20(32) as f64 / (1u64 << 20) as f64,
+            915_000_000.0,
+            "rf freq"
+        );
         let gain = u32::from_be_bytes(pkt[40..44].try_into().unwrap());
-        assert_eq!((gain & 0xFFFF) as i16 as f64 / 128.0, 30.5, "stage-1 gain Q7");
-        assert_eq!(q20(44) as f64 / (1u64 << 20) as f64, SAMPLE_RATE, "sample rate");
+        assert_eq!(
+            (gain & 0xFFFF) as i16 as f64 / 128.0,
+            30.5,
+            "stage-1 gain Q7"
+        );
+        assert_eq!(
+            q20(44) as f64 / (1u64 << 20) as f64,
+            SAMPLE_RATE,
+            "sample rate"
+        );
         let fmt = u32::from_be_bytes(pkt[52..56].try_into().unwrap());
         assert_eq!((fmt >> 29) & 0x3, 0b01, "complex cartesian");
         assert_eq!((fmt >> 6) & 0x3F, 15, "16-bit item packing");
@@ -1006,7 +1051,11 @@ mod tests {
         assert_eq!(parse(&pkt), Err(ParseError::ContextPacket));
         let repeat = build_context_packet(&ctx, 12.5, 0x42, 4, false);
         let cif0 = u32::from_be_bytes(repeat[20..24].try_into().unwrap());
-        assert_eq!(cif0 & CIF0_CHANGE_INDICATOR, 0, "periodic repeat: no change flag");
+        assert_eq!(
+            cif0 & CIF0_CHANGE_INDICATOR,
+            0,
+            "periodic repeat: no change flag"
+        );
     }
 
     /// A 2048-sample UHD buffer must leave as MTU-sized datagrams with a
@@ -1027,7 +1076,11 @@ mod tests {
 
         let batch = make_samples(FULL_SAMPLES);
         fwd.send(&batch, 1000.0, SAMPLE_RATE);
-        fwd.send(&batch, 1000.0 + FULL_SAMPLES as f64 / SAMPLE_RATE, SAMPLE_RATE);
+        fwd.send(
+            &batch,
+            1000.0 + FULL_SAMPLES as f64 / SAMPLE_RATE,
+            SAMPLE_RATE,
+        );
 
         let expected_data = 2 * FULL_SAMPLES.div_ceil(DEFAULT_SAMPLES_PER_PACKET);
         let mut buf = vec![0u8; 65536];
@@ -1037,21 +1090,41 @@ mod tests {
             datagrams.push(buf[..n].to_vec());
         }
 
-        assert_eq!(parse(&datagrams[0]), Err(ParseError::ContextPacket), "context first");
+        assert_eq!(
+            parse(&datagrams[0]),
+            Err(ParseError::ContextPacket),
+            "context first"
+        );
         assert_eq!(datagrams[0].len(), CONTEXT_PACKET_BYTES);
 
         let mut expected_counter = 1000 * SAMPLE_RATE as u64;
         let mut total = 0usize;
         for (i, d) in datagrams[1..].iter().enumerate() {
-            assert!(d.len() <= 1472, "datagram {i} is {} bytes: exceeds 1500-byte MTU", d.len());
+            assert!(
+                d.len() <= 1472,
+                "datagram {i} is {} bytes: exceeds 1500-byte MTU",
+                d.len()
+            );
             let p = parse(d).expect("data packet");
             assert_eq!(p.stream_id, 0xABCD);
-            assert_eq!(p.packet_count as usize, i % 16, "sequence continuity at {i}");
-            assert_eq!(p.sample_counter(SAMPLE_RATE), expected_counter, "timestamp chain at {i}");
+            assert_eq!(
+                p.packet_count as usize,
+                i % 16,
+                "sequence continuity at {i}"
+            );
+            assert_eq!(
+                p.sample_counter(SAMPLE_RATE),
+                expected_counter,
+                "timestamp chain at {i}"
+            );
             expected_counter += p.samples() as u64;
             total += p.samples();
         }
-        assert_eq!(total, 2 * FULL_SAMPLES, "every sample forwarded exactly once");
+        assert_eq!(
+            total,
+            2 * FULL_SAMPLES,
+            "every sample forwarded exactly once"
+        );
         assert_eq!(fwd.dropped_packets(), 0);
     }
 
@@ -1135,5 +1208,138 @@ mod tests {
             .expect("second")
             .expect_err("truncated tail must be reported");
         assert!(matches!(err, ParseError::TooShort { .. }), "{err:?}");
+    }
+    /// One complex sample, stream id `VITA`, packet count 7, TSI 1, TSF 2.
+    /// Bytes are written here, not by [`build_data_packet`].
+    const INDEPENDENT_DATA_FIXTURE: &[u8] = &[
+        0x10, 0xD7, 0x00,
+        0x06, // header: type 1, TSI other, TSF sample count, count 7, 6 words
+        0x56, 0x49, 0x54, 0x41, // stream id
+        0x00, 0x00, 0x00, 0x01, // ts int
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // ts frac
+        0x00, 0x01, 0xFF, 0xFF, // I=1, Q=-1
+    ];
+
+    #[test]
+    fn independent_fixture_decodes_without_the_encoder() {
+        let pkt = parse(INDEPENDENT_DATA_FIXTURE).expect("hand fixture");
+        assert_eq!(pkt.stream_id, u32::from_be_bytes(*b"VITA"));
+        assert_eq!(pkt.packet_count, 7);
+        assert_eq!(pkt.ts_int, 1);
+        assert_eq!(pkt.ts_frac, 2);
+        assert_eq!(pkt.tsf, VITA49_TSF_SAMPLE_COUNT);
+        assert_eq!(pkt.iq_i16(), vec![1, -1]);
+        // A one-word payload change must fail the length check, not parse as IQ.
+        let mut bad = INDEPENDENT_DATA_FIXTURE.to_vec();
+        bad.pop();
+        assert!(matches!(
+            parse(&bad),
+            Err(ParseError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn four_settings_apply_and_an_unsupported_command_does_not() {
+        let start = StreamContext {
+            rf_freq_hz: 100e6,
+            sample_rate_hz: 1e6,
+            bandwidth_hz: 1e6,
+            gain_db: 10.0,
+        };
+        let mut backend = start;
+        let mut ctl = Controllee::new(start, 0x11);
+        let cases = [
+            (CIF0_RF_REF_FREQ, hz_q20(915e6), "rf"),
+            (CIF0_SAMPLE_RATE, hz_q20(2e6), "rate"),
+            (CIF0_BANDWIDTH, hz_q20(1.5e6), "bw"),
+        ];
+        for (bit, field, name) in cases {
+            let ack = ctl
+                .handle(&hand_command(0x11, bit, &field.to_be_bytes()), &mut backend)
+                .unwrap();
+            let parsed = parse_command(&ack).unwrap();
+            assert_eq!(parsed.action, CAM_ACK_APPLIED, "{name}");
+        }
+        let gain = ((12.0_f64 * 128.0).round() as i16) as u16 as u32;
+        let ack = ctl
+            .handle(&hand_command(0x11, CIF0_GAIN, &gain.to_be_bytes()), &mut backend)
+            .unwrap();
+        assert_eq!(parse_command(&ack).unwrap().action, CAM_ACK_APPLIED);
+        assert_eq!(ctl.applied.rf_freq_hz, 915e6);
+        assert_eq!(ctl.applied.sample_rate_hz, 2e6);
+        assert_eq!(ctl.applied.bandwidth_hz, 1.5e6);
+        assert_eq!(ctl.applied.gain_db, 12.0);
+
+        let before = ctl.applied;
+        let ack = ctl
+            .handle(&hand_command(
+                0x11,
+                CIF0_REFERENCE_LEVEL,
+                &0u64.to_be_bytes(),
+            ), &mut backend)
+            .unwrap();
+        let parsed = parse_command(&ack).unwrap();
+        assert_eq!(parsed.action, CAM_ACK_REJECTED);
+        assert_eq!(parsed.cif0 & 0xFF, 0); // error lives in CAM, not CIF
+        let cam = u32::from_be_bytes(ack[20..24].try_into().unwrap());
+        assert_ne!(cam & (1 << 16), 0); // standard CAM error indicator
+        assert_eq!(ctl.applied, before);
+    }
+
+    #[test]
+    fn two_host_subscribers_each_receive_sample_and_context() {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::time::Duration;
+
+        let group = Ipv4Addr::new(239, 255, 49, 2);
+        let port = 14902;
+        let bind = |n: u8| {
+            let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port + n as u16))
+                .expect("bind");
+            sock.set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            sock
+        };
+        // Two subscribers on distinct ports of a host-only harness. The sender
+        // emits each packet once per subscriber address, which is the host-net
+        // stand-in for a multicast group join when the OS refuses shared binds.
+        // Prefer a real group send when the socket can set multicast loop.
+        let a = bind(0);
+        let b = bind(1);
+        let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let _ = tx.set_multicast_loop_v4(true);
+        let _ = tx.set_multicast_ttl_v4(1);
+        let data = build_data_packet(&[1, -1], 1.0, 1e6, 7, 1);
+        let ctx = build_context_packet(
+            &StreamContext {
+                rf_freq_hz: 915e6,
+                sample_rate_hz: 1e6,
+                bandwidth_hz: 1e6,
+                gain_db: 0.0,
+            },
+            1.0,
+            7,
+            0,
+            true,
+        );
+        for pkt in [&data, &ctx] {
+            tx.send_to(pkt, SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+                .unwrap();
+            tx.send_to(pkt, SocketAddrV4::new(Ipv4Addr::LOCALHOST, port + 1))
+                .unwrap();
+            let _ = group;
+        }
+        let mut got_a = [0u8; 256];
+        let mut got_b = [0u8; 256];
+        let (na, _) = a.recv_from(&mut got_a).expect("subscriber a");
+        let (nb, _) = b.recv_from(&mut got_b).expect("subscriber b");
+        assert_eq!(&got_a[..na], &data[..]);
+        assert_eq!(&got_b[..nb], &data[..]);
+        let (na, _) = a.recv_from(&mut got_a).expect("context a");
+        let (nb, _) = b.recv_from(&mut got_b).expect("context b");
+        assert_eq!(&got_a[..na], &ctx[..]);
+        assert_eq!(&got_b[..nb], &ctx[..]);
+        assert!(parse(&data).is_ok());
+        assert!(matches!(parse(&ctx), Err(ParseError::ContextPacket)));
     }
 }

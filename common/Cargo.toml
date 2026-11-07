@@ -9,3 +9,4 @@ anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 toml.workspace = true
+socket2 = "0.6"

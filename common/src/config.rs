@@ -12,6 +12,13 @@
 use serde::Deserialize;
 use std::path::Path;
 
+#[path = "control_config.rs"]
+mod control;
+pub use control::ControlConfig;
+#[path = "multicast_config.rs"]
+mod multicast;
+pub use multicast::MulticastConfig;
+
 /// Top-level configuration read from config.toml.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -23,6 +30,9 @@ pub struct Config {
     pub device: DeviceConfig,
     pub rf: RfConfig,
     pub forwarding: ForwardingConfig,
+    /// Capture-only endpoint; disabled unless explicitly enabled.
+    #[serde(default)]
+    pub control: ControlConfig,
     /// Where this service's input comes from. Optional: capture reads a USRP, not
     /// a UDP stream, so it has no use for the section.
     #[serde(default)]
@@ -61,6 +71,9 @@ pub struct ForwardingConfig {
     pub vita49_dest_host: String,
     /// Destination port for VITA49 UDP packets.
     pub vita49_dest_port: u16,
+    /// Optional additional LAN multicast copy; primary destination is preserved.
+    #[serde(default)]
+    pub multicast: Option<MulticastConfig>,
 }
 
 fn default_antenna() -> String {
@@ -275,6 +288,10 @@ impl Config {
         if self.forwarding.vita49_dest_port == 0 {
             anyhow::bail!("vita49_dest_port must be non-zero");
         }
+        self.control.validate()?;
+        if let Some(multicast) = &self.forwarding.multicast {
+            multicast.validate()?;
+        }
         self.input.validate()?;
         if let Some(channel) = &self.channel {
             channel.validate(self.rf.sample_rate)?;
@@ -300,6 +317,16 @@ mod tests {
         vita49_dest_host = "waterfall-service.default.svc.cluster.local"
         vita49_dest_port = 4820
     "#;
+    #[test]
+    fn multicast_copy_preserves_the_primary_consumer() {
+        let text = format!("{CAPTURE_TOML}\n[forwarding.multicast]\ngroup='239.255.49.2'\nport=4820\ninterface='192.0.2.55'\n");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.forwarding.vita49_dest_host, "waterfall-service.default.svc.cluster.local");
+        let multicast = cfg.forwarding.multicast.unwrap();
+        assert_eq!(multicast.group.to_string(), "239.255.49.2");
+        assert_eq!(multicast.ttl, 1);
+    }
 
     const CHANNELIZER_TOML: &str = r#"
         [rf]

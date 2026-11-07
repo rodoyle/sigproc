@@ -9,6 +9,9 @@ metadata:
     app: sigproc
 spec:
   replicas: 1
+  # Never surge a second UHD owner while replacing the B210 collector.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: sigproc
@@ -22,6 +25,9 @@ spec:
         kubernetes.io/hostname: rpi-four-2
       # USB passthrough: privileged + hostPID for /dev/bus/usb access
       hostPID: true
+      # Temporary direct LAN multicast path; no CNI multicast dependency.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         # ghcr.io pull credentials. Must exist in this namespace:
         #   kubectl -n default create secret generic ghcr-pull \
@@ -31,7 +37,7 @@ spec:
         - name: ghcr-pull
       containers:
         - name: sigproc
-          image: ghcr.io/rodoyle/sigproc:latest
+          image: ghcr.io/rodoyle/sigproc:host-vrt-20261107-v1
           imagePullPolicy: Always
           securityContext:
             privileged: true

@@ -19,6 +19,13 @@ use std::path::PathBuf;
 #[cfg(feature = "uhd-support")]
 mod capture;
 
+#[cfg(any(feature = "uhd-support", test))]
+mod control;
+#[cfg(feature = "uhd-support")]
+mod uhd_control;
+#[cfg(test)]
+mod profile_tests;
+
 /// SDR RF front-end: UHD capture + VITA49 UDP forward.
 #[derive(Parser, Debug)]
 #[command(name = "sigproc", version, about)]
@@ -100,48 +107,73 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     // ── Open USRP and start streaming ────────────────────────────────────
+    // Bind before opening hardware so endpoint errors fail at startup.
+    let control_socket = control::ControlSocket::bind(&cfg.control)?;
     log::info!("opening USRP and configuring RF...");
-    let (mut usrp, sample_rate) = capture::open_usrp(&cfg.device.device_args, &cfg.rf)?;
-
-    let mut streamer = capture::create_rx_streamer(&mut usrp)?;
-
-    // ── VITA49 UDP forwarder ─────────────────────────────────────────────
-    let stream_id = (cfg.rf.center_freq as u32).wrapping_mul(1000);
+    let (mut usrp, _) = capture::open_usrp(&cfg.device.device_args, &cfg.rf)?;
+    let stream_id = cfg.control.stream_id;
+    let mut controllee = vita49::Controllee::new(uhd_control::readback(&usrp)?, stream_id);
     let mut forwarder = vita49::Vita49Forwarder::new(
         &cfg.forwarding.vita49_dest_host,
         cfg.forwarding.vita49_dest_port,
         stream_id,
     )?;
-    // Context packets let SoapyVITA49-style consumers learn tuning, rate and
-    // payload format from the stream itself. Sent before the first data packet
-    // and periodically thereafter; a retune would call set_context again.
-    forwarder.set_context(vita49::StreamContext {
-        rf_freq_hz: cfg.rf.center_freq,
-        sample_rate_hz: sample_rate,
-        bandwidth_hz: cfg.rf.bandwidth,
-        gain_db: cfg.rf.rx_gain,
-    });
-
+    forwarder.set_context(controllee.applied);
+    let mut multicast_forwarder = if let Some(multicast) = &cfg.forwarding.multicast {
+        let copy = vita49::Vita49Forwarder::new(&multicast.group.to_string(), multicast.port, stream_id)?;
+        copy.configure_multicast(multicast.interface, multicast.ttl)?;
+        log::info!("LAN multicast {}:{} via {} TTL {}; primary unicast retained",
+            multicast.group, multicast.port, multicast.interface, multicast.ttl);
+        Some(copy)
+    } else {
+        None
+    };
+    if let Some(copy) = &mut multicast_forwarder {
+        copy.set_context(controllee.applied);
+    }
     log::info!(
         "capture loop started: stream_id=0x{:08x}, {} samples/packet",
         stream_id,
         forwarder.samples_per_packet()
     );
 
-    // ── Main capture loop ────────────────────────────────────────────────
     loop {
-        match capture::read_batch(&mut streamer) {
-            Ok(Some((ts, samples))) => {
-                forwarder.send(&samples, ts, sample_rate);
+        // UHD borrows Usrp for the streamer's lifetime. Stop/drop before
+        // applying controls on this same owner thread; never open a second radio.
+        let datagram = {
+            let mut streamer = capture::create_rx_streamer(&mut usrp)?;
+            loop {
+                if let Some(endpoint) = &control_socket {
+                    if let Some(datagram) = endpoint.poll()? {
+                        streamer.send_command(&uhd::StreamCommand {
+                            time: uhd::StreamTime::Now,
+                            command_type: uhd::StreamCommandType::StopContinuous,
+                        })?;
+                        break datagram;
+                    }
+                }
+                match capture::read_batch(&mut streamer) {
+                    Ok(Some((ts, samples))) => {
+                        forwarder.send(&samples, ts, controllee.applied.sample_rate_hz);
+                        if let Some(copy) = &mut multicast_forwarder {
+                            copy.send(&samples, ts, controllee.applied.sample_rate_hz);
+                        }
+                    }
+                    Ok(None) => {
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    }
+                    Err(e) => {
+                        log::error!("capture error: {}", e);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
             }
-            Ok(None) => {
-                // No samples available yet — brief yield to avoid busy-wait
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
-            Err(e) => {
-                log::error!("capture error: {}", e);
-                // Transient errors (USB hiccup, buffer overflow) — continue
-                std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        if let Some(endpoint) = &control_socket {
+            endpoint.dispatch(&datagram, &mut controllee, &mut uhd_control::UhdControl(&mut usrp))?;
+            forwarder.set_context(controllee.applied);
+            if let Some(copy) = &mut multicast_forwarder {
+                copy.set_context(controllee.applied);
             }
         }
     }
