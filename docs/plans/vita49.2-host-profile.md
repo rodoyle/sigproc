@@ -3,9 +3,9 @@
 The Rust/UHD capture service is the sole B210 owner. Downstream subscribers
 never open UHD. This is a bounded VRT profile, not every VITA 49.2 feature.
 Hardware-free protocol proof does not establish live multicast delivery or GUI compatibility.
-The active goal now authorizes live host-network deployment and Windows group
-reception. Those checks remain pending until recorded below; GUI/CNI/gateway
-acceptance remains deferred.
+The authorized host-network deployment and Windows group reception on the lab
+LAN are recorded below. CubicSDR/GUI setup, CNI migration and gateway work
+remain deferred.
 
 ## Data and context wire contract
 
@@ -123,9 +123,11 @@ no mutation, unauthorized/malformed traffic, and hardware-failure/no-ACK.
 One production forwarder sends context and samples into a host UDP fanout relay;
 two concurrently bound subscribers receive byte-identical packets. That is a
 local UDP harness, **not evidence of multicast delivery across the lab LAN**.
-UHD-feature compilation and live radio behavior need separate Linux/UHD evidence.
+The separate ARM64/UHD release build and live LAN observations are recorded in
+[vita49-host-live-proof.md](vita49-host-live-proof.md). Hardware-free tests remain
+independent of those lab prerequisites.
 
-### Windows multicast listener (prepared, live reception not yet proved)
+### Windows multicast listener
 
 `test/vrt_listener.py` is an independent Python standard-library decoder and a
 bounded IPv4 group listener. It imports no Rust encoder/decoder code, checks
@@ -134,16 +136,17 @@ the same stream ID arrive. Group membership alone is not success.
 
 ```powershell
 # Substitute the actual multicast destination and this PC's LAN IPv4 address.
-python test/vrt_listener.py --group 239.255.49.2 --port 4820 --interface 192.0.2.10 --seconds 15
+python test/vrt_listener.py --group 239.255.49.2 --port 4820 --interface 192.168.0.15 --seconds 15
 python -m unittest discover -s test -p test_vrt_listener.py -q
 ```
 
-The example IP is a documentation placeholder, not a discovered local interface.
-The decoder's three fixture tests passed on Windows; no lab packet receipt is
-claimed. Read-only lab inspection on 2026-11-07 showed collector pod
-`sigproc-76b747854c-tzh58` on `rpi-four-2`, pod IP `10.42.0.40`, with
-`hostNetwork` unset and Deployment strategy `RollingUpdate`. No live Deployment
-or ConfigMap has been changed by this work.
+The live Windows interface used was `192.168.0.15`. The collector on
+`rpi-four-2` transmits from `192.168.0.55`; the Windows listener runs locally,
+not in a cluster pod. Before rollout the old pod was `10.42.0.40` with
+`hostNetwork` unset and `RollingUpdate`. After rollout the collector uses the
+node LAN address, `hostNetwork: true`, and `Recreate`. See the recorded
+[build and live proof](vita49-host-live-proof.md) for exact image/source and
+packet receipts. No CNI or gateway change was used.
 
 ### Authorized temporary lab deployment
 
@@ -159,15 +162,15 @@ interface, port and TTL. Control remains disabled in the lab ConfigMap.
 
 Release build: commit/push runtime source, then override the Kaniko Job's
 `GIT_REF` with that exact commit using a local kubectl patch before applying.
-The distinct `host-vrt-20261107-v1` tag avoids overwriting `latest`; the live
-Deployment will be pinned to the returned digest after the build succeeds.
-Building from `master` alone is not current-working-tree evidence.
+The distinct `host-vrt-20261107-v1` build tag did not overwrite `latest`; the live
+Deployment is pinned to the resulting digest. The build receipt shows the
+exact checked-out runtime source, not merely the branch name.
 
 Rollback baseline image:
 `ghcr.io/rodoyle/sigproc@sha256:39015a363ddbe80a53a46809f5e4b8c11ad0c91a43cd8abf1bfd0469679a0ddb`.
 If rollout fails, restore that image and original unicast-only configuration;
-keep one replica and `Recreate` while rolling back. This source note is not a
-claim of a successful build/deployment; actual receipts will be recorded later.
+keep one replica and `Recreate` while rolling back. Build, deployment and local
+Windows reception receipts are recorded in the linked live-proof document.
 
 ## Deferred path (design notes only)
 

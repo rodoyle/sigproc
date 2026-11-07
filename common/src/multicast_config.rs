@@ -11,13 +11,24 @@ pub struct MulticastConfig {
     #[serde(default = "default_ttl")]
     pub ttl: u32,
 }
-fn default_ttl() -> u32 { 1 }
+fn default_ttl() -> u32 {
+    1
+}
 impl MulticastConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.group.is_multicast(), "forwarding.multicast.group must be multicast");
+        anyhow::ensure!(
+            self.group.is_multicast(),
+            "forwarding.multicast.group must be multicast"
+        );
         anyhow::ensure!(self.port != 0, "forwarding.multicast.port must be nonzero");
-        anyhow::ensure!(!self.interface.is_unspecified() && !self.interface.is_multicast(), "forwarding.multicast.interface must be a local unicast IPv4 address");
-        anyhow::ensure!((1..=255).contains(&self.ttl), "forwarding.multicast.ttl must be 1..255");
+        anyhow::ensure!(
+            !self.interface.is_unspecified() && !self.interface.is_multicast(),
+            "forwarding.multicast.interface must be a local unicast IPv4 address"
+        );
+        anyhow::ensure!(
+            (1..=255).contains(&self.ttl),
+            "forwarding.multicast.ttl must be 1..255"
+        );
         Ok(())
     }
 }
@@ -26,7 +37,12 @@ mod tests {
     use super::*;
     #[test]
     fn validate_group_interface_port_ttl() {
-        let mut cfg = MulticastConfig { group: "239.255.49.2".parse().unwrap(), port: 4820, interface: "192.0.2.10".parse().unwrap(), ttl: 1 };
+        let mut cfg = MulticastConfig {
+            group: "239.255.49.2".parse().unwrap(),
+            port: 4820,
+            interface: "192.0.2.10".parse().unwrap(),
+            ttl: 1,
+        };
         cfg.validate().unwrap();
         cfg.group = Ipv4Addr::LOCALHOST;
         assert!(cfg.validate().is_err());

@@ -11,8 +11,10 @@ host UDP harness. The command preamble was corrected against an external
 SoapyVITA49 layout (CAM, Message ID, optional identifiers, CIF0).
 
 Observed local gates: `cargo test -p sigproc -p sigproc-common --quiet` passed
-with 7 capture tests, 96 common tests passing and 1 pre-existing ignored test.
+with 7 capture tests, 98 common tests passing and 1 pre-existing ignored test.
 A fresh read-only reviewer found no source-level blocker but could not execute
 tests because that reviewer had no command tool. The parent executed the gates.
-These observations do not prove UHD-feature compilation, hardware tuning,
-live deployment or Windows multicast delivery. Those require separate evidence.
+The ARM64/UHD build, exact source/image receipts, host-network deployment and
+local Windows multicast reception have since been observed separately; see
+[vita49-host-live-proof.md](vita49-host-live-proof.md). CubicSDR/GUI acceptance,
+CNI migration, gateway implementation and live tuning acceptance remain deferred.
