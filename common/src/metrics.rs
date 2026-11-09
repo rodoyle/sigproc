@@ -11,7 +11,7 @@
 //!   [`crate::dsp::Channelizer::settling_samples`].
 //!
 //! Deliberately dependency-free: a hand-rolled HTTP/1.1 responder over
-//! `std::net::TcpListener` handling one request per connection. Pulling a web
+//! `std::net::TcpListener` with a bounded worker pool and one request per connection. Pulling a web
 //! framework into the capture image (which is already carrying UHD on an arm64
 //! node) to serve two endpoints would be a poor trade.
 
@@ -220,13 +220,29 @@ pub fn spawn_http<M: MetricsRenderer>(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let listener = TcpListener::bind(listen)?;
     log::info!("metrics listening on http://{listen}/metrics");
+    // One silent connection must not starve scrapes. Bound both workers and
+    // queued sockets so hostile/slow clients cannot grow threads or memory.
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(4);
+    let receiver = Arc::new(std::sync::Mutex::new(receiver));
+    for _ in 0..4 {
+        let receiver = receiver.clone();
+        let metrics = metrics.clone();
+        let prefix = prefix.clone();
+        std::thread::spawn(move || loop {
+            let stream = receiver.lock().unwrap().recv();
+            let Ok(mut stream) = stream else { break };
+            if let Err(e) = handle_connection(&mut stream, &prefix, metrics.as_ref()) {
+                log::debug!("metrics connection error: {e}");
+            }
+        });
+    }
     Ok(std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => {
-                    if let Err(e) = handle_connection(&mut s, &prefix, metrics.as_ref()) {
-                        log::debug!("metrics connection error: {e}");
-                    }
+                Ok(stream) => {
+                    // Saturation drops the excess connection; no unbounded
+                    // queue and no per-request warnings during overload.
+                    let _ = sender.try_send(stream);
                 }
                 Err(e) => log::warn!("metrics accept error: {e}"),
             }
@@ -320,6 +336,26 @@ mod tests {
             m.render("demod").contains("\ndemod_seq_gaps_total")
                 || m.render("demod").contains("\ndemod_vita49_seq_gaps_total")
         );
+    }
+
+    #[test]
+    fn idle_client_does_not_block_a_scrape() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let _server = spawn_http(addr, "capture".into(), Arc::new(Metrics::new())).unwrap();
+        let _silent = TcpStream::connect(addr).unwrap();
+        let mut scrape = TcpStream::connect(addr).unwrap();
+        scrape
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        scrape
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut result = String::new();
+        scrape.read_to_string(&mut result).unwrap();
+        assert!(result.starts_with("HTTP/1.1 200 OK"));
+        assert!(result.contains("capture_samples_in_total"));
     }
 
     #[test]

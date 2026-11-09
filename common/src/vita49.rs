@@ -298,6 +298,7 @@ pub struct Vita49Forwarder {
     total_dropped: u64,
     packets_sent: u64,
     bytes_sent: u64,
+    last_context_warning: Option<Instant>,
 }
 
 impl Vita49Forwarder {
@@ -344,6 +345,7 @@ impl Vita49Forwarder {
             total_dropped: 0,
             packets_sent: 0,
             bytes_sent: 0,
+            last_context_warning: None,
         })
     }
 
@@ -457,13 +459,18 @@ impl Vita49Forwarder {
 
     /// Emit the context packet when it is due (changed, first ever, or the
     /// periodic cadence elapsed).
-    fn maybe_send_context(&mut self, timestamp_secs: f64, dest: SocketAddr) {
+    fn maybe_send_context(
+        &mut self,
+        timestamp_secs: f64,
+        dest: SocketAddr,
+        send: &mut impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>,
+    ) -> bool {
         let Some(ctx) = self.context else {
-            return;
+            return true;
         };
         let periodic = self.data_since_context >= CONTEXT_EVERY_N_DATA_PACKETS;
         if !(self.context_dirty || periodic) {
-            return;
+            return true;
         }
         let pkt = build_context_packet(
             &ctx,
@@ -475,7 +482,7 @@ impl Vita49Forwarder {
         self.context_seq = (self.context_seq + 1) & 0xF;
         self.data_since_context = 0;
         self.context_dirty = false;
-        match self.socket.send_to(&pkt, dest) {
+        match send(&self.socket, &pkt, dest) {
             Ok(n) if n == pkt.len() => {
                 self.packets_sent += 1;
                 self.bytes_sent += n as u64;
@@ -487,19 +494,59 @@ impl Vita49Forwarder {
                     ctx.gain_db,
                     dest
                 );
+                true
             }
             result => {
                 self.total_dropped += 1;
-                // Retry any failed context before transmitting subsequent data.
+                // Retry before any more IQ, even for periodic context. Without
+                // this gate new-rate samples could use stale receiver metadata.
                 self.context_dirty = true;
-                log::warn!("VITA49 context send failed to {}: {:?}", dest, result);
+                if self.context_warning_due(Instant::now()) {
+                    log::warn!(
+                        "VITA49 context send failed to {}: {:?}; retrying, IQ suppressed",
+                        dest,
+                        result
+                    );
+                }
+                false
             }
         }
     }
 
+    fn context_warning_due(&mut self, now: Instant) -> bool {
+        if self
+            .last_context_warning
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(5))
+        {
+            return false;
+        }
+        self.last_context_warning = Some(now);
+        true
+    }
+
     /// Frame and send exactly one data packet (at most `samples_per_packet`).
     fn send_one(&mut self, samples: &[i16], timestamp_secs: f64, sample_rate: f64) {
+        self.send_one_with(
+            samples,
+            timestamp_secs,
+            sample_rate,
+            &mut |socket, packet, dest| socket.send_to(packet, dest),
+        );
+    }
+
+    // The send seam permits deterministic transport-failure tests without
+    // relying on timing or exhausting a platform-specific socket buffer.
+    fn send_one_with(
+        &mut self,
+        samples: &[i16],
+        timestamp_secs: f64,
+        sample_rate: f64,
+        send: &mut impl FnMut(&UdpSocket, &[u8], SocketAddr) -> std::io::Result<usize>,
+    ) {
         self.packet_count = self.packet_count.wrapping_add(1);
+        let seq = self.data_seq;
+        // Suppressed/unresolved IQ consumes sequence too, exposing the gap.
+        self.data_seq = (self.data_seq + 1) & 0xF;
 
         let Some(dest) = self.resolved else {
             // No consumer yet — drop but keep capturing.
@@ -515,17 +562,16 @@ impl Vita49Forwarder {
             return;
         };
 
-        self.maybe_send_context(timestamp_secs, dest);
+        if !self.maybe_send_context(timestamp_secs, dest, send) {
+            self.total_dropped += 1; // IQ intentionally suppressed after lost context
+            return;
+        }
 
         let num_samples = samples.len() / 2; // I/Q pairs
-        let seq = self.data_seq;
         let buf = build_data_packet(samples, timestamp_secs, sample_rate, self.stream_id, seq);
-        // The sequence number advances even when the datagram is lost: a
-        // receiver that checks continuity must see the hole.
-        self.data_seq = (self.data_seq + 1) & 0xF;
         self.data_since_context += 1;
 
-        match self.socket.send_to(&buf, dest) {
+        match send(&self.socket, &buf, dest) {
             Ok(n) if n == buf.len() => {
                 self.packets_sent += 1;
                 self.bytes_sent += n as u64;
@@ -1180,6 +1226,81 @@ mod tests {
                 packets_dropped: 0,
             }
         );
+    }
+
+    #[test]
+    fn failed_changed_context_suppresses_iq_then_recovers_in_order() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut fwd =
+            Vita49Forwarder::new("127.0.0.1", rx.local_addr().unwrap().port(), 1).unwrap();
+        let mut ctx = StreamContext {
+            rf_freq_hz: 915e6,
+            sample_rate_hz: 2e6,
+            bandwidth_hz: 2e6,
+            gain_db: 30.0,
+        };
+        fwd.set_context(ctx);
+        fwd.send(&[1, -1], 1.0, ctx.sample_rate_hz);
+        let mut buffer = [0u8; 2048];
+        rx.recv(&mut buffer).unwrap(); // initial context
+        rx.recv(&mut buffer).unwrap(); // initial data, sequence 0
+        ctx.sample_rate_hz = 250_000.0;
+        fwd.set_context(ctx);
+        let mut attempts = Vec::new();
+        let mut fail = true;
+        let mut transport = |socket: &UdpSocket, packet: &[u8], dest| {
+            attempts.push(packet.to_vec());
+            if fail {
+                fail = false;
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            } else {
+                socket.send_to(packet, dest)
+            }
+        };
+        fwd.send_one_with(&[2, -2], 2.0, ctx.sample_rate_hz, &mut transport);
+        fwd.send_one_with(&[3, -3], 3.0, ctx.sample_rate_hz, &mut transport);
+        assert_eq!(
+            attempts.len(),
+            3,
+            "failed context, retried context, then IQ only"
+        );
+        assert_eq!(
+            attempts.iter().map(|p| p[0] >> 4).collect::<Vec<_>>(),
+            [4, 4, 1]
+        );
+        assert_ne!(
+            u32::from_be_bytes(attempts[1][20..24].try_into().unwrap()) & (1 << 31),
+            0
+        );
+        let n = rx.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], attempts[1]);
+        assert_eq!(
+            i64::from_be_bytes(buffer[44..52].try_into().unwrap()) as f64 / 1048576.0,
+            ctx.sample_rate_hz
+        );
+        let n = rx.recv(&mut buffer).unwrap();
+        let data = parse(&buffer[..n]).unwrap();
+        assert_eq!(data.packet_count, 2, "suppressed IQ consumes sequence 1");
+        assert_eq!(data.iq_i16(), [3, -3]);
+        assert_eq!(
+            fwd.stats().packets_dropped,
+            2,
+            "failed context and suppressed IQ"
+        );
+        assert_eq!(fwd.stats().packets_sent, 4);
+        assert!(!fwd.context_dirty);
+    }
+
+    #[test]
+    fn context_warnings_are_time_bounded_under_sustained_failure() {
+        let mut fwd = Vita49Forwarder::new("127.0.0.1", 12345, 1).unwrap();
+        let now = Instant::now();
+        assert!(fwd.context_warning_due(now));
+        for _ in 0..10_000 {
+            assert!(!fwd.context_warning_due(now + Duration::from_secs(1)));
+        }
+        assert!(fwd.context_warning_due(now + Duration::from_secs(5)));
     }
 
     #[test]
