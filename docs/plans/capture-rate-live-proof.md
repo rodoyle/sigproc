@@ -2,12 +2,55 @@
 
 Observed on 2026-11-09 against the lab B210 on `rpi-four-2`.
 
-## Target and build
+## Final reviewed revision
+
+The final installed application/client source is
+`a7bc3d6e457a6e69ddf47b26070e59e9f98cce44`, including the context-ordering,
+warning-rate, bounded HTTP-worker and scoped Alloy-patch corrections from
+`261ab9ec042879f82806cb1153e22c160003e958`. A read-only reviewer found no remaining
+blocking findings after those corrections; it could inspect but not execute
+tests. `build/kaniko-sigproc-rate-a7bc3d6` built this source successfully using
+the same pinned UHD-image override described below. Its pushed digest, the
+live container imageID and the final Deployment pin all agree:
+`ghcr.io/rodoyle/sigproc@sha256:e20a2b4aff884d3e1d3318aed2640e287478f02254322f333a433516a4809984`.
+The pod reported ready, zero restarts, with one collector owner.
+
+The final rollout includes HTTP startup/readiness probes after hardware
+initialization. This addresses a real earlier check that sent a command before
+UHD finished opening: it timed out and the next controller saw its late ACK.
+The client now ignores unrelated/stale ACKs within its bounded deadline without
+resending; the regression test uses actual UDP sockets.
+
+Immediately after the final readiness-gated rollout, the bounded live test
+again requested 250,000 and received a matching applied ACK at 250,000. The local
+multicast listener decoded context at 250,000; in five seconds it received
+1,281,080 samples in 3,753 data packets. A separate four-second interval recorded
+1,001,472 captured samples and 4,065,288 multicast payload bytes, with zero local
+multicast-drop delta. The test's `finally` restored 2,000,000; matched ACK and
+actual-rate metric both confirmed restoration. Subsequent four-second deltas
+were 8,005,632 samples and 32,488,816 multicast bytes, with total local multicast
+drops zero. Three receive errors (logged UHD overflows) had been recorded at
+that observation point; no loss-free claim is made.
+
+VictoriaMetrics returned `up{job="sigproc-capture"}=1`, current sample rate
+2000000 after restoration, and
+`min_over_time(sigproc_capture_sample_rate_hz[10m])=250000` for the final test
+window. Labels remained `cluster="homelab"`,
+`instance="sigproc-metrics.default.svc:9087"`, `job="sigproc-capture"`.
+
+Final host gates: workspace tests passed (118 passed, zero failed, one existing
+ignored test), UHD-feature collector tests passed (9), and Python tests passed
+(10). UHD-feature check passed. Strict Clippy with `-D warnings` did not pass:
+the workspace has pre-existing DSP/config lint findings; normal Clippy completed
+with warnings, including the capture batch return-type complexity warning.
+No warning or ignored test was suppressed to claim a clean lint gate.
+
+## Initial implementation proof (historical)
 
 Application source: `72b2c663d051269cfabcd9755d5abcfc5a7939b7`.
 Image loaded by the running pod (container imageID):
 `ghcr.io/rodoyle/sigproc@sha256:e77726b8d8f91cb07a3697eecbc428b5150abb2c1ed437eb1eb7fa19b49e5b55`.
-`deploy/sigproc-deployment.yaml` pins this digest. Deployment remained one replica,
+This was the initial rollout digest, superseded by the final pin above. Deployment remained one replica,
 `Recreate`, with host networking; no additional UHD owner was started.
 
 The initial Kaniko build failed at the unbounded FPGA wget (exit 4/network).
