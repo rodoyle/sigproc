@@ -37,7 +37,7 @@ spec:
         - name: ghcr-pull
       containers:
         - name: sigproc
-          image: ghcr.io/rodoyle/sigproc@sha256:5a023a1b9d62578d42e12936a4d5e152ebc4af8beeadf538c3c714f552bbdb7a  # yamllint disable-line rule:line-length
+          image: ghcr.io/rodoyle/sigproc@sha256:e77726b8d8f91cb07a3697eecbc428b5150abb2c1ed437eb1eb7fa19b49e5b55  # yamllint disable-line rule:line-length
           imagePullPolicy: Always
           securityContext:
             privileged: true

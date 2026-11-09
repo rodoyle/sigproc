@@ -1,5 +1,11 @@
 # VITA 49.2 capture host profile
 
+Current rate-control/telemetry operation is documented in
+[capture-rate-observability.md](capture-rate-observability.md), with
+[live rate and ingestion proof](capture-rate-live-proof.md). Historical lab
+settings below describe the original host-multicast rollout; the current
+ConfigMap opts in to loopback-only VRT control.
+
 The Rust/UHD capture service is the sole B210 owner. Downstream subscribers
 never open UHD. This is a bounded VRT profile, not every VITA 49.2 feature.
 Hardware-free protocol proof does not establish live multicast delivery or GUI compatibility.
