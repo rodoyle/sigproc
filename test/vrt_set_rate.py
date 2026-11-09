@@ -6,6 +6,7 @@ import secrets
 import socket
 import struct
 import sys
+import time
 
 SCALE = 1 << 20
 
@@ -35,6 +36,27 @@ def parse_ack(data, stream_id, message_id):
     return actual, bool(cam & (1 << 11))
 
 
+def receive_ack(sock, stream_id, message_id, timeout):
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("no matching acknowledgement before deadline")
+        sock.settimeout(remaining)
+        data = sock.recv(65535)
+        # A timed-out previous controller can leave a late ACK for this fixed
+        # source port. Ignore unrelated responses, never resend the command.
+        if len(data) < 28:
+            continue
+        stream = struct.unpack_from(">I", data, 4)[0]
+        message = struct.unpack_from(">I", data, 24)[0]
+        if stream != stream_id or message != message_id:
+            continue
+        return parse_ack(data, stream_id, message_id)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rate", type=float, help="requested complex samples per second")
@@ -46,15 +68,15 @@ def main():
     parser.add_argument("--timeout", type=float, default=3)
     args = parser.parse_args()
     try:
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         msg = secrets.randbits(32)
         packet = request(args.stream_id, args.rate, msg)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.bind((args.bind, args.source_port))
-            sock.settimeout(args.timeout)
             sock.connect((args.host, args.port))
             sock.send(packet)
-            data = sock.recv(65535)
-        actual, partial = parse_ack(data, args.stream_id, msg)
+            actual, partial = receive_ack(sock, args.stream_id, msg, args.timeout)
         print(f"requested={args.rate:g} samples/s actual={actual:g} samples/s" + (" (hardware rounded or partially applied)" if partial else ""))
     except (OSError, ValueError, OverflowError, struct.error) as exc:
         print(f"rate control failed: {exc}; timeout does not prove the command was not applied", file=sys.stderr)

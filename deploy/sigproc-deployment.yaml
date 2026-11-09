@@ -37,8 +37,26 @@ spec:
         - name: ghcr-pull
       containers:
         - name: sigproc
-          image: ghcr.io/rodoyle/sigproc@sha256:e77726b8d8f91cb07a3697eecbc428b5150abb2c1ed437eb1eb7fa19b49e5b55  # yamllint disable-line rule:line-length
+          image: ghcr.io/rodoyle/sigproc@sha256:ca518e9e5a14c2e41159c3a78e681af5673c86eb8068315dbb341b9386b8c451  # yamllint disable-line rule:line-length
           imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9087
+              protocol: TCP
+          # Hardware initialization precedes HTTP bind. Do not report a newly
+          # started container ready while control datagrams are only queued.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 3
           securityContext:
             privileged: true
           env:

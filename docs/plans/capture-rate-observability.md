@@ -52,6 +52,14 @@ send; compare receiver sequence/timestamp gaps and switch/port drops as well.
 UHD error metadata and errors returned by receive calls share one counter;
 empty reads include timeouts and are not by themselves packet loss.
 
+The metrics endpoint is read-only, not authenticated. Host networking also
+makes port 9087 reachable on the node's LAN address: the ClusterIP Service does
+not hide that port. Four workers and a bounded socket queue prevent a single
+silent client from stalling scrapes or unbounded connection memory, but a
+hostile flood can still deny scrapes. On an untrusted LAN, restrict this port
+to monitoring sources with node firewall policy or a trusted proxy; no such
+firewall change is claimed here.
+
 Apply `deploy/sigproc-metrics-service.yaml`. The existing monitoring Alloy
 configuration is owned outside this repository; `python3 deploy/configure-alloy.py`
 adds this target to its existing services scrape without replacing unrelated

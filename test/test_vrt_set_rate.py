@@ -1,3 +1,4 @@
+import socket
 import struct
 import unittest
 
@@ -18,6 +19,18 @@ class RateClientTests(unittest.TestCase):
         self.assertEqual(struct.unpack(">IIIIIq", packet),
                          ((6 << 28) | 7, 1, (2 << 23) | (1 << 19), 123,
                           1 << 21, 250_000 * client.SCALE))
+
+    def test_late_ack_is_ignored_and_wait_remains_bounded(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as controller, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+            controller.bind(('127.0.0.1', 0))
+            peer.bind(('127.0.0.1', 0))
+            controller.connect(peer.getsockname())
+            for packet in (b'bad', ack(message=122), ack()):
+                peer.sendto(packet, controller.getsockname())
+            self.assertEqual(client.receive_ack(controller, 1, 123, 1), (250_000, False))
+            peer.sendto(ack(message=122), controller.getsockname())
+            with self.assertRaises(TimeoutError):
+                client.receive_ack(controller, 1, 123, 0.05)
 
     def test_readback_and_rejections(self):
         self.assertEqual(client.parse_ack(ack(), 1, 123), (250_000, False))
