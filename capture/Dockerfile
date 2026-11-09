@@ -128,6 +128,8 @@ COPY --from=builder /usr/share/uhd/images /usr/share/uhd/images
 
 # Copy compiled Rust binary
 COPY --from=builder /build/target/release/sigproc /usr/local/bin/sigproc
+# Small loopback VRT controller; python3 is already in the runtime image.
+COPY test/vrt_set_rate.py /usr/local/bin/vrt-set-rate
 
 # UHD environment
 ENV UHD_IMAGES_DIR=/usr/share/uhd/images

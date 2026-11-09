@@ -109,11 +109,17 @@ fn udp_four_settings_acknowledge_backend_readback_and_unsupported_does_not_mutat
         assert_eq!(word(&ack, 4), 17);
         assert_ne!(word(&ack, 0) & (1 << 26), 0); // ACK, not echoed request
         assert_eq!(word(&ack, 24), 1); // echoed Message ID
-        assert_eq!(word(&ack, 20) & ((1 << 19) | (1 << 10)), (1 << 19) | (1 << 10));
+        assert_eq!(
+            word(&ack, 20) & ((1 << 19) | (1 << 10)),
+            (1 << 19) | (1 << 10)
+        );
         assert_eq!(word(&ack, 20) & (1 << 16), 0);
         assert_eq!(hz(&ack, 32), ctl.applied.bandwidth_hz);
         assert_eq!(hz(&ack, 40), ctl.applied.rf_freq_hz);
-        assert_eq!(word(&ack, 48) as u16 as i16 as f64 / 128.0, ctl.applied.gain_db);
+        assert_eq!(
+            word(&ack, 48) as u16 as i16 as f64 / 128.0,
+            ctl.applied.gain_db
+        );
         assert_eq!(hz(&ack, 52), ctl.applied.sample_rate_hz);
         assert_eq!(Some(ctl.applied), backend.state);
     }
@@ -211,11 +217,12 @@ fn two_host_subscribers_receive_context_and_samples_without_uhd() {
     let b = UdpSocket::bind("127.0.0.1:0").unwrap();
     let relay = UdpSocket::bind("127.0.0.1:0").unwrap();
     for receiver in [&a, &b, &relay] {
-        receiver.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
     }
-    let mut forwarder = vita49::Vita49Forwarder::new(
-        "127.0.0.1", relay.local_addr().unwrap().port(), 17,
-    ).unwrap();
+    let mut forwarder =
+        vita49::Vita49Forwarder::new("127.0.0.1", relay.local_addr().unwrap().port(), 17).unwrap();
     forwarder.set_context(initial());
     forwarder.send(&[1, -1], 1.0, 1e6);
     for expected_type in [4, 1] {
@@ -223,7 +230,9 @@ fn two_host_subscribers_receive_context_and_samples_without_uhd() {
         assert_eq!(word(&packet, 0) >> 28, expected_type);
         assert_eq!(word(&packet, 4), 17);
         for subscriber in [&a, &b] {
-            relay.send_to(&packet, subscriber.local_addr().unwrap()).unwrap();
+            relay
+                .send_to(&packet, subscriber.local_addr().unwrap())
+                .unwrap();
         }
         let got_a = receive(&a);
         let got_b = receive(&b);
@@ -240,6 +249,62 @@ fn two_host_subscribers_receive_context_and_samples_without_uhd() {
             assert_eq!(word(&got_a, 52), 0x200003cf);
         }
     }
+}
+
+#[test]
+fn python_rate_client_talks_to_real_udp_controllee() {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = peer.local_addr().unwrap().port();
+    drop(peer);
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let endpoint = ControlSocket {
+        socket,
+        peer: format!("127.0.0.1:{port}").parse().unwrap(),
+    };
+    let control_port = endpoint.socket.local_addr().unwrap().port();
+    let client = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/vrt_set_rate.py");
+    let mut child = std::process::Command::new("python3")
+        .arg(client)
+        .args([
+            "250000",
+            "--port",
+            &control_port.to_string(),
+            "--source-port",
+            &port.to_string(),
+            "--stream-id",
+            "17",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ctl = Controllee::new(initial(), 17);
+    let mut backend = MockBackend {
+        state: Some(initial()),
+        ..Default::default()
+    };
+    let datagram = poll(&endpoint);
+    endpoint
+        .dispatch(&datagram, &mut ctl, &mut backend)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("rate client timed out");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("actual=250000"));
+    assert_eq!(ctl.applied.sample_rate_hz, 250_000.0);
+    assert_eq!(backend.calls.len(), 1);
 }
 
 #[test]

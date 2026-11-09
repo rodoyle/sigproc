@@ -114,21 +114,23 @@ pub fn create_rx_streamer(usrp: &mut Usrp) -> anyhow::Result<ReceiveStreamer<'_,
 
 /// Read one batch of sc16 IQ samples from the streamer.
 ///
-/// Returns `(timestamp_secs, interleaved_i16)` where samples are `[I0, Q0, I1, Q1, ...]`.
-/// Returns `Ok(None)` if no samples arrived within the 0.1s timeout.
+/// Returns optional timestamp/samples and whether UHD reported a metadata error.
+/// An empty batch can still carry an overflow or other UHD error.
 pub fn read_batch(
     streamer: &mut ReceiveStreamer<'_, Complex<i16>>,
-) -> anyhow::Result<Option<(f64, Vec<i16>)>> {
+) -> anyhow::Result<(Option<(f64, Vec<i16>)>, bool)> {
     let mut buf = vec![Complex::new(0i16, 0i16); SAMPLES_PER_READ];
     let metadata = streamer.receive(&mut [&mut buf], 0.1, false)?;
 
+    let has_error = if let Some(err) = metadata.last_error() {
+        log::warn!("UHD RX error: {}", err);
+        true
+    } else {
+        false
+    };
     let num = metadata.samples();
     if num == 0 {
-        return Ok(None);
-    }
-
-    if let Some(err) = metadata.last_error() {
-        log::warn!("UHD RX error: {}", err);
+        return Ok((None, has_error));
     }
 
     let ts = metadata
@@ -143,5 +145,5 @@ pub fn read_batch(
         samples.push(c.im);
     }
 
-    Ok(Some((ts, samples)))
+    Ok((Some((ts, samples)), has_error))
 }

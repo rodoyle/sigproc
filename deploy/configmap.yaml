@@ -38,6 +38,15 @@ data:
     interface = "192.168.0.55" # rpi-four-2 LAN address
     ttl = 1
 
+    # The host-network collector accepts control only on the node's loopback.
+    # The source-IP/port allowlist is not authentication; keep it off the LAN.
     [control]
-    enabled = false # do not expose radio control on the LAN by default
+    enabled = true
+    ctrl_addr = "127.0.0.1"
+    ctrl_port = 4991
+    authorized_controller = "127.0.0.1:50000"
     stream_id = 1
+
+    [input]
+    # Capture uses this field only for its Prometheus/health HTTP server.
+    metrics_listen = "0.0.0.0:9087"

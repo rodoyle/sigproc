@@ -21,10 +21,12 @@ mod capture;
 
 #[cfg(any(feature = "uhd-support", test))]
 mod control;
-#[cfg(feature = "uhd-support")]
-mod uhd_control;
 #[cfg(test)]
 mod profile_tests;
+#[cfg(any(feature = "uhd-support", test))]
+mod telemetry;
+#[cfg(feature = "uhd-support")]
+mod uhd_control;
 
 /// SDR RF front-end: UHD capture + VITA49 UDP forward.
 #[derive(Parser, Debug)]
@@ -113,6 +115,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let (mut usrp, _) = capture::open_usrp(&cfg.device.device_args, &cfg.rf)?;
     let stream_id = cfg.control.stream_id;
     let mut controllee = vita49::Controllee::new(uhd_control::readback(&usrp)?, stream_id);
+    let metrics = std::sync::Arc::new(telemetry::CaptureMetrics::default());
+    metrics.set_rate(controllee.applied.sample_rate_hz);
+    let metrics_addr = cfg.input.metrics_listen.parse()?;
+    let _metrics_server = sigproc_common::metrics::spawn_http(
+        metrics_addr,
+        "sigproc_capture".into(),
+        metrics.clone(),
+    )?;
     let mut forwarder = vita49::Vita49Forwarder::new(
         &cfg.forwarding.vita49_dest_host,
         cfg.forwarding.vita49_dest_port,
@@ -120,16 +130,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     )?;
     forwarder.set_context(controllee.applied);
     let mut multicast_forwarder = if let Some(multicast) = &cfg.forwarding.multicast {
-        let copy = vita49::Vita49Forwarder::new(&multicast.group.to_string(), multicast.port, stream_id)?;
+        let copy =
+            vita49::Vita49Forwarder::new(&multicast.group.to_string(), multicast.port, stream_id)?;
         copy.configure_multicast(multicast.interface, multicast.ttl)?;
-        log::info!("LAN multicast {}:{} via {} TTL {}; primary unicast retained",
-            multicast.group, multicast.port, multicast.interface, multicast.ttl);
+        log::info!(
+            "LAN multicast {}:{} via {} TTL {}; primary unicast retained",
+            multicast.group,
+            multicast.port,
+            multicast.interface,
+            multicast.ttl
+        );
         Some(copy)
     } else {
         None
     };
     if let Some(copy) = &mut multicast_forwarder {
         copy.set_context(controllee.applied);
+        metrics.multicast(copy.stats());
     }
     log::info!(
         "capture loop started: stream_id=0x{:08x}, {} samples/packet",
@@ -145,6 +162,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             loop {
                 if let Some(endpoint) = &control_socket {
                     if let Some(datagram) = endpoint.poll()? {
+                        metrics.control();
                         streamer.send_command(&uhd::StreamCommand {
                             time: uhd::StreamTime::Now,
                             command_type: uhd::StreamCommandType::StopContinuous,
@@ -153,16 +171,25 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 match capture::read_batch(&mut streamer) {
-                    Ok(Some((ts, samples))) => {
-                        forwarder.send(&samples, ts, controllee.applied.sample_rate_hz);
-                        if let Some(copy) = &mut multicast_forwarder {
-                            copy.send(&samples, ts, controllee.applied.sample_rate_hz);
+                    Ok((batch, metadata_error)) => {
+                        if metadata_error {
+                            metrics.receive_error();
+                        }
+                        if let Some((ts, samples)) = batch {
+                            metrics.samples(samples.len() / 2);
+                            forwarder.send(&samples, ts, controllee.applied.sample_rate_hz);
+                            metrics.primary(forwarder.stats());
+                            if let Some(copy) = &mut multicast_forwarder {
+                                copy.send(&samples, ts, controllee.applied.sample_rate_hz);
+                                metrics.multicast(copy.stats());
+                            }
+                        } else {
+                            metrics.empty_read();
+                            std::thread::sleep(std::time::Duration::from_micros(100));
                         }
                     }
-                    Ok(None) => {
-                        std::thread::sleep(std::time::Duration::from_micros(100));
-                    }
                     Err(e) => {
+                        metrics.receive_error();
                         log::error!("capture error: {}", e);
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -170,7 +197,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         };
         if let Some(endpoint) = &control_socket {
-            endpoint.dispatch(&datagram, &mut controllee, &mut uhd_control::UhdControl(&mut usrp))?;
+            endpoint.dispatch(
+                &datagram,
+                &mut controllee,
+                &mut uhd_control::UhdControl(&mut usrp),
+            )?;
+            metrics.set_rate(controllee.applied.sample_rate_hz);
             forwarder.set_context(controllee.applied);
             if let Some(copy) = &mut multicast_forwarder {
                 copy.set_context(controllee.applied);

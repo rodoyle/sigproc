@@ -1,0 +1,16 @@
+# Internal scrape endpoint for the host-network capture pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sigproc-metrics
+  namespace: default
+  labels:
+    app: sigproc
+spec:
+  selector:
+    app: sigproc
+  ports:
+    - name: metrics
+      port: 9087
+      targetPort: 9087
+      protocol: TCP

@@ -251,6 +251,15 @@ fn split_timestamp(timestamp_secs: f64, sample_rate: f64) -> (u32, u64) {
 /// datagram fits in one Ethernet frame. A context packet is interleaved every
 /// [`CONTEXT_EVERY_N_DATA_PACKETS`] data packets and whenever
 /// [`Vita49Forwarder::set_context`] changes the stream metadata.
+/// Datagram delivery counters at the local UDP socket boundary. Successful
+/// sends do not prove reception across the network.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ForwarderStats {
+    pub packets_sent: u64,
+    pub bytes_sent: u64,
+    pub packets_dropped: u64,
+}
+
 pub struct Vita49Forwarder {
     socket: UdpSocket,
     /// Destination as given, e.g. `waterfall-service:4820`.
@@ -287,6 +296,8 @@ pub struct Vita49Forwarder {
     /// counters because a Prometheus counter must never go down, and
     /// `dropped_since_warn` is deliberately reset once the destination resolves.
     total_dropped: u64,
+    packets_sent: u64,
+    bytes_sent: u64,
 }
 
 impl Vita49Forwarder {
@@ -331,12 +342,18 @@ impl Vita49Forwarder {
             send_dropped: 0,
             send_dropped_since_warn: 0,
             total_dropped: 0,
+            packets_sent: 0,
+            bytes_sent: 0,
         })
     }
 
     /// Select the LAN interface explicitly for IPv4 multicast, without changing
     /// the destination or binding the separate control endpoint.
-    pub fn configure_multicast(&self, interface: std::net::Ipv4Addr, ttl: u32) -> anyhow::Result<()> {
+    pub fn configure_multicast(
+        &self,
+        interface: std::net::Ipv4Addr,
+        ttl: u32,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!((1..=255).contains(&ttl), "invalid multicast TTL");
         let socket = socket2::SockRef::from(&self.socket);
         socket.set_multicast_if_v4(&interface)?;
@@ -459,19 +476,24 @@ impl Vita49Forwarder {
         self.data_since_context = 0;
         self.context_dirty = false;
         match self.socket.send_to(&pkt, dest) {
-            Ok(_) => log::debug!(
-                "VITA49 context: f={} Hz fs={} Hz bw={} Hz gain={} dB -> {}",
-                ctx.rf_freq_hz,
-                ctx.sample_rate_hz,
-                ctx.bandwidth_hz,
-                ctx.gain_db,
-                dest
-            ),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Lost to backpressure; re-announce with the next data packet.
-                self.context_dirty = true;
+            Ok(n) if n == pkt.len() => {
+                self.packets_sent += 1;
+                self.bytes_sent += n as u64;
+                log::debug!(
+                    "VITA49 context: f={} Hz fs={} Hz bw={} Hz gain={} dB -> {}",
+                    ctx.rf_freq_hz,
+                    ctx.sample_rate_hz,
+                    ctx.bandwidth_hz,
+                    ctx.gain_db,
+                    dest
+                );
             }
-            Err(e) => log::error!("VITA49 context send error to {}: {}", dest, e),
+            result => {
+                self.total_dropped += 1;
+                // Retry any failed context before transmitting subsequent data.
+                self.context_dirty = true;
+                log::warn!("VITA49 context send failed to {}: {:?}", dest, result);
+            }
         }
     }
 
@@ -505,6 +527,8 @@ impl Vita49Forwarder {
 
         match self.socket.send_to(&buf, dest) {
             Ok(n) if n == buf.len() => {
+                self.packets_sent += 1;
+                self.bytes_sent += n as u64;
                 log::debug!(
                     "VITA49 pkt #{} seq {}: {} samples, {} bytes -> {}",
                     self.packet_count,
@@ -514,7 +538,10 @@ impl Vita49Forwarder {
                     dest
                 );
             }
-            Ok(n) => log::warn!("VITA49 partial send: {}/{} bytes", n, buf.len()),
+            Ok(n) => {
+                self.total_dropped += 1;
+                log::warn!("VITA49 partial send: {}/{} bytes", n, buf.len());
+            }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Non-blocking socket + default SO_SNDBUF: a congested or
                 // stalled consumer lands here. Count it, because the packet is
@@ -535,7 +562,10 @@ impl Vita49Forwarder {
                     );
                 }
             }
-            Err(e) => log::error!("VITA49 send error to {}: {}", dest, e),
+            Err(e) => {
+                self.total_dropped += 1;
+                log::error!("VITA49 send error to {}: {}", dest, e);
+            }
         }
     }
 }
@@ -552,6 +582,14 @@ impl Vita49Forwarder {
     /// distorted by the internal warning-window counters being reset.
     pub fn dropped_packets(&self) -> u64 {
         self.total_dropped
+    }
+
+    pub fn stats(&self) -> ForwarderStats {
+        ForwarderStats {
+            packets_sent: self.packets_sent,
+            bytes_sent: self.bytes_sent,
+            packets_dropped: self.total_dropped,
+        }
     }
 }
 
@@ -771,10 +809,18 @@ mod tests {
 
     impl ControlBackend for StreamContext {
         fn apply_and_readback(&mut self, update: ControlUpdate) -> anyhow::Result<StreamContext> {
-            if let Some(value) = update.rf_freq_hz { self.rf_freq_hz = value; }
-            if let Some(value) = update.sample_rate_hz { self.sample_rate_hz = value; }
-            if let Some(value) = update.bandwidth_hz { self.bandwidth_hz = value; }
-            if let Some(value) = update.gain_db { self.gain_db = value; }
+            if let Some(value) = update.rf_freq_hz {
+                self.rf_freq_hz = value;
+            }
+            if let Some(value) = update.sample_rate_hz {
+                self.sample_rate_hz = value;
+            }
+            if let Some(value) = update.bandwidth_hz {
+                self.bandwidth_hz = value;
+            }
+            if let Some(value) = update.gain_db {
+                self.gain_db = value;
+            }
             Ok(*self)
         }
     }
@@ -1126,6 +1172,31 @@ mod tests {
             "every sample forwarded exactly once"
         );
         assert_eq!(fwd.dropped_packets(), 0);
+        assert_eq!(
+            fwd.stats(),
+            ForwarderStats {
+                packets_sent: datagrams.len() as u64,
+                bytes_sent: datagrams.iter().map(|packet| packet.len() as u64).sum(),
+                packets_dropped: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn unresolved_destination_counts_each_unsent_data_packet() {
+        let mut fwd = Vita49Forwarder::new("127.0.0.1", 12345, 1).unwrap();
+        fwd.resolved = None;
+        fwd.last_resolve_attempt = Some(Instant::now());
+        fwd.set_samples_per_packet(1);
+        fwd.send(&[1, 2, 3, 4], 0.0, SAMPLE_RATE);
+        assert_eq!(
+            fwd.stats(),
+            ForwarderStats {
+                packets_sent: 0,
+                bytes_sent: 0,
+                packets_dropped: 2
+            }
+        );
     }
 
     /// A trailer bit means extra words this parser does not skip; accepting it
@@ -1262,7 +1333,10 @@ mod tests {
         }
         let gain = ((12.0_f64 * 128.0).round() as i16) as u16 as u32;
         let ack = ctl
-            .handle(&hand_command(0x11, CIF0_GAIN, &gain.to_be_bytes()), &mut backend)
+            .handle(
+                &hand_command(0x11, CIF0_GAIN, &gain.to_be_bytes()),
+                &mut backend,
+            )
             .unwrap();
         assert_eq!(parse_command(&ack).unwrap().action, CAM_ACK_APPLIED);
         assert_eq!(ctl.applied.rf_freq_hz, 915e6);
@@ -1272,11 +1346,10 @@ mod tests {
 
         let before = ctl.applied;
         let ack = ctl
-            .handle(&hand_command(
-                0x11,
-                CIF0_REFERENCE_LEVEL,
-                &0u64.to_be_bytes(),
-            ), &mut backend)
+            .handle(
+                &hand_command(0x11, CIF0_REFERENCE_LEVEL, &0u64.to_be_bytes()),
+                &mut backend,
+            )
             .unwrap();
         let parsed = parse_command(&ack).unwrap();
         assert_eq!(parsed.action, CAM_ACK_REJECTED);

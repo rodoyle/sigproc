@@ -201,11 +201,22 @@ impl Metrics {
     }
 }
 
+/// A service-specific Prometheus exposition served by the shared HTTP endpoint.
+pub trait MetricsRenderer: Send + Sync + 'static {
+    fn render_metrics(&self, prefix: &str) -> String;
+}
+
+impl MetricsRenderer for Metrics {
+    fn render_metrics(&self, prefix: &str) -> String {
+        self.render(prefix)
+    }
+}
+
 /// Serve `/metrics` and `/healthz` on `listen` from a background thread.
-pub fn spawn_http(
+pub fn spawn_http<M: MetricsRenderer>(
     listen: SocketAddr,
     prefix: String,
-    metrics: Arc<Metrics>,
+    metrics: Arc<M>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let listener = TcpListener::bind(listen)?;
     log::info!("metrics listening on http://{listen}/metrics");
@@ -213,7 +224,7 @@ pub fn spawn_http(
         for stream in listener.incoming() {
             match stream {
                 Ok(mut s) => {
-                    if let Err(e) = handle_connection(&mut s, &prefix, &metrics) {
+                    if let Err(e) = handle_connection(&mut s, &prefix, metrics.as_ref()) {
                         log::debug!("metrics connection error: {e}");
                     }
                 }
@@ -223,10 +234,10 @@ pub fn spawn_http(
     }))
 }
 
-fn handle_connection(
+fn handle_connection<M: MetricsRenderer>(
     stream: &mut TcpStream,
     prefix: &str,
-    metrics: &Metrics,
+    metrics: &M,
 ) -> std::io::Result<()> {
     // A client that connects and never sends must not wedge the loop.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -240,7 +251,7 @@ fn handle_connection(
         "/metrics" => (
             "200 OK",
             "text/plain; version=0.0.4; charset=utf-8",
-            metrics.render(prefix),
+            metrics.render_metrics(prefix),
         ),
         "/healthz" => ("200 OK", "text/plain; charset=utf-8", "ok\n".to_string()),
         _ => (
