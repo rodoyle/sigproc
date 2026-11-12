@@ -1,0 +1,21 @@
+# Dedicated UDP endpoint: never share this Service with another consumer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vita49-demod
+  namespace: default
+  labels:
+    app: sigproc-demod
+spec:
+  type: ClusterIP
+  selector:
+    app: sigproc-demod
+  ports:
+    - name: vita49-in
+      port: 4930
+      targetPort: vita49-in
+      protocol: UDP
+    - name: metrics
+      port: 9093
+      targetPort: metrics
+      protocol: TCP

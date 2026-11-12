@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigproc-demod-config
+  namespace: default
+  labels:
+    app: sigproc-demod
+data:
+  DEMOD_MODE: "nbfm"
+  DEMOD_FM_DEVIATION_HZ: "2500"
+  DEMOD_LISTEN: "0.0.0.0:4930"
+  DEMOD_METRICS_LISTEN: "0.0.0.0:9093"
+  DEMOD_OUTPUT_DIR: "/recordings"
+  RUST_LOG: "info"

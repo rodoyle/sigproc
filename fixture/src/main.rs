@@ -28,7 +28,7 @@
 //!   assertion meaningless.
 
 use clap::Parser;
-use sigproc_common::vectors::{vita49_stream, AmTone};
+use sigproc_common::vectors::{vita49_stream, AmTone, NbfmTone};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -40,6 +40,9 @@ struct Cli {
     #[arg(long)]
     am: bool,
 
+    /// Emit a constant-envelope narrowband FM signal.
+    #[arg(long)]
+    nbfm: bool,
     /// Modulating tone in Hz.
     #[arg(long, alias = "tone", default_value_t = 1000.0)]
     tone_hz: f64,
@@ -60,6 +63,9 @@ struct Cli {
     #[arg(long, default_value_t = 0.5)]
     depth: f64,
 
+    /// NBFM peak frequency deviation in Hz.
+    #[arg(long, default_value_t = 2_000.0)]
+    deviation_hz: f64,
     /// Unmodulated carrier amplitude as a fraction of full scale.
     #[arg(long, default_value_t = 0.5)]
     amplitude: f64,
@@ -91,42 +97,63 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         .format_timestamp_millis()
         .init();
 
-    if !cli.am {
-        anyhow::bail!(
-            "only --am (AM/DSB) vectors are implemented; NBFM is a deferred item. \
-             Pass --am to generate the AM test vector."
-        );
+    if cli.am == cli.nbfm {
+        anyhow::bail!("select exactly one modulation mode: --nbfm or --am");
     }
     if cli.samples_per_packet == 0 {
         anyhow::bail!("--samples-per-packet must be at least 1");
     }
 
-    let spec = AmTone {
-        tone_hz: cli.tone_hz,
-        offset_hz: cli.offset_hz,
-        sample_rate: cli.sample_rate,
-        seconds: cli.seconds,
-        depth: cli.depth,
-        amplitude: cli.amplitude,
+    let (iq, mode, peak) = if cli.am {
+        let spec = AmTone {
+            tone_hz: cli.tone_hz,
+            offset_hz: cli.offset_hz,
+            sample_rate: cli.sample_rate,
+            seconds: cli.seconds,
+            depth: cli.depth,
+            amplitude: cli.amplitude,
+        };
+        let peak = spec.peak_amplitude();
+        if peak > 1.0 {
+            anyhow::bail!(
+                "peak envelope amplitude {peak} exceeds full scale: amplitude {} with depth {} \
+                 would clip sc16. Use --amplitude {} or less (peak = amplitude x (1 + depth)).",
+                spec.amplitude,
+                spec.depth.clamp(0.0, 1.0),
+                1.0 / (1.0 + spec.depth.clamp(0.0, 1.0))
+            );
+        }
+        (spec.generate(), "am", peak)
+    } else {
+        anyhow::ensure!(
+            cli.tone_hz.is_finite() && cli.tone_hz > 0.0,
+            "--tone-hz must be finite and positive"
+        );
+        anyhow::ensure!(
+            cli.deviation_hz.is_finite() && cli.deviation_hz > 0.0,
+            "--deviation-hz must be finite and positive"
+        );
+        anyhow::ensure!(
+            cli.amplitude.is_finite() && (0.0..=1.0).contains(&cli.amplitude),
+            "--amplitude must be between zero and one"
+        );
+        let spec = NbfmTone {
+            tone_hz: cli.tone_hz,
+            offset_hz: cli.offset_hz,
+            sample_rate: cli.sample_rate,
+            seconds: cli.seconds,
+            deviation_hz: cli.deviation_hz,
+            amplitude: cli.amplitude,
+        };
+        let peak = spec.peak_amplitude();
+        (spec.generate(), "nbfm", peak)
     };
-
     // Refuse to clip. A clipped fixture would silently turn every downstream
     // amplitude assertion into a measurement of the clipper.
-    let peak = spec.peak_amplitude();
-    if peak > 1.0 {
-        anyhow::bail!(
-            "peak envelope amplitude {peak} exceeds full scale: amplitude {} with depth {} \
-             would clip sc16. Use --amplitude {} or less (peak = amplitude x (1 + depth)).",
-            spec.amplitude,
-            spec.depth.clamp(0.0, 1.0),
-            1.0 / (1.0 + spec.depth.clamp(0.0, 1.0))
-        );
-    }
-
-    let iq = spec.generate();
+    anyhow::ensure!(peak <= 1.0, "peak amplitude {peak} exceeds full scale");
     let (bytes, packets) = vita49_stream(
         &iq,
-        spec.sample_rate,
+        cli.sample_rate,
         cli.samples_per_packet,
         cli.start_secs,
     );
@@ -151,13 +178,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     let meta = serde_json::json!({
         "ok": true,
-        "mode": "am",
-        "tone_hz": spec.tone_hz,
-        "offset_hz": spec.offset_hz,
-        "sample_rate_hz": spec.sample_rate,
-        "seconds": spec.seconds,
-        "depth": spec.depth.clamp(0.0, 1.0),
-        "amplitude": spec.amplitude,
+        "mode": mode,
+        "tone_hz": cli.tone_hz,
+        "offset_hz": cli.offset_hz,
+        "sample_rate_hz": cli.sample_rate,
+        "seconds": cli.seconds,
+        "depth": cli.am.then(|| cli.depth.clamp(0.0, 1.0)),
+        "deviation_hz": cli.nbfm.then_some(cli.deviation_hz),
+        "amplitude": cli.amplitude,
         "peak_amplitude": peak,
         "samples": iq.len(),
         "samples_per_packet": cli.samples_per_packet,

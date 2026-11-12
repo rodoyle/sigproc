@@ -1,0 +1,30 @@
+# Replay-only channelizer config for the deterministic demod acceptance gate.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigproc-demod-gate-config
+  namespace: default
+  labels:
+    app: sigproc-demod
+    type: gate
+data:
+  config.toml: |
+    [rf]
+    center_freq = 915_000_000.0
+    sample_rate = 2_000_000.0
+    rx_gain = 30.0
+    antenna = "RX2"
+    bandwidth = 2_000_000.0
+
+    [forwarding]
+    vita49_dest_host = "vita49-demod.default.svc.cluster.local"
+    vita49_dest_port = 4930
+
+    [input]
+    mode = "udp"
+    listen = "0.0.0.0:4810"
+    metrics_listen = "0.0.0.0:8080"
+
+    [channel]
+    offset_hz = 200_000.0
+    output_rate_hz = 50_000.0

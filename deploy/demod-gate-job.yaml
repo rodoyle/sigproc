@@ -1,0 +1,84 @@
+# Deterministic NBFM fixture -> channelizer replay -> standalone demod Service.
+# Pause the production channelizer first so its live stream cannot enter
+# the gate.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sigproc-demod-gate
+  namespace: default
+  labels:
+    app: sigproc-demod
+    type: gate
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: fixture
+          image: ghcr.io/rodoyle/sigproc-fixture:latest
+          imagePullPolicy: Always
+          args:
+            - --nbfm
+            - --tone-hz=1000
+            - --offset-hz=200000
+            - --deviation-hz=2000
+            - --seconds=2
+            - --out=/fixtures/nbfm.vita49
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+      containers:
+        - name: channelizer-replay
+          image: ghcr.io/rodoyle/sigproc-channelizer:latest
+          imagePullPolicy: Always
+          args:
+            - --config=/etc/sigproc/config.toml
+            - --input=replay
+            - --file=/fixtures/nbfm.vita49
+            - --realtime
+            - --report=/fixtures/gate-report.json
+          env:
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1500m"
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+            - name: config
+              mountPath: /etc/sigproc
+              readOnly: true
+      volumes:
+        - name: fixtures
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: sigproc-demod-gate-config

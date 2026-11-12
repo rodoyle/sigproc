@@ -1,10 +1,11 @@
-# Kaniko Job: builds and pushes the three UHD-free service images.
+# Kaniko Job: builds and pushes the four UHD-free service images.
 #
 #   channelizer/Dockerfile -> ghcr.io/rodoyle/sigproc-channelizer:latest
 #   fixture/Dockerfile     -> ghcr.io/rodoyle/sigproc-fixture:latest
 #   sink/Dockerfile        -> ghcr.io/rodoyle/sigproc-sink:latest
+#   demod/Dockerfile       -> ghcr.io/rodoyle/sigproc-demod:latest
 #
-# One Job for all three because they share the expensive parts: the repo clone
+# One Job for all four because they share the expensive parts: the repo clone
 # and the scratch volume. The dependency-cooking layers are cached in the
 # registry between runs.
 #
@@ -96,7 +97,7 @@ spec:
               readOnly: true
             - name: kaniko-scratch
               mountPath: /kaniko-scratch
-        # ── The three builds, sequentially, sharing clone + scratch ─────
+        # ── The four builds, sequentially, sharing clone + scratch ─────
         - name: build-channelizer
           image: gcr.io/kaniko-project/executor:latest
           args:
@@ -142,6 +143,21 @@ spec:
               mountPath: /workspace
             - name: kaniko-scratch
               mountPath: /kaniko-scratch
+        - name: build-demod
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=demod/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-demod:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
       containers:
         # A pod needs a main container; the work is all in the init containers.
         - name: report
@@ -149,7 +165,7 @@ spec:
           command:
             - sh
             - -c
-            - echo "all three images built and pushed"
+            - echo "all four images built and pushed"
       volumes:
         - name: workspace
           emptyDir: {}

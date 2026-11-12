@@ -1,6 +1,7 @@
 # Deployment: channelizer service.
 #
-#   sigproc (B210) --VITA49/UDP--> sigproc-channelizer --VITA49/UDP--> sink
+#   sigproc (B210) --VITA49/UDP--> sigproc-channelizer
+#      --VITA49/UDP--> NBFM demod
 #
 # This pod needs NO hardware: it reads a UDP stream and writes another. That is
 # what makes it schedulable anywhere, unlike the capture service, which is
@@ -57,11 +58,12 @@ spec:
           image: ghcr.io/rodoyle/sigproc-fixture:latest
           imagePullPolicy: Always
           args:
-            - --am
+            - --nbfm
             - --tone-hz=1000
             - --offset-hz=200000
+            - --deviation-hz=2000
             - --seconds=1
-            - --out=/fixtures/am.vita49
+            - --out=/fixtures/nbfm.vita49
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

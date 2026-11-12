@@ -23,11 +23,10 @@ data:
     bandwidth = 2_000_000.0
 
     [forwarding]
-    # Narrowband output. Until the demod microservice exists this points at the
-    # in-repo sink, so the deployed chain always terminates in something that
-    # can say whether the stream is healthy.
-    vita49_dest_host = "vita49-sink.default.svc.cluster.local"
-    vita49_dest_port = 4920
+    # The standalone demod is the production narrowband terminus. Its dedicated
+    # Service has one consumer; the assertion sink remains available to gates.
+    vita49_dest_host = "vita49-demod.default.svc.cluster.local"
+    vita49_dest_port = 4930
 
     [input]
     # Production: consume the wideband VITA49 stream. The end-to-end gate

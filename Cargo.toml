@@ -10,13 +10,14 @@
 #   channelizer/  bin  sigproc-channelizer (wideband -> narrowband channel)
 #   fixture/      bin  sigproc-fixture     (deterministic IQ/VITA49 test vectors)
 #   sink/         bin  vita49-sink         (receiving assertion sink for gates)
+#   demod/        lib  sigproc-demod       (stateful IQ -> mono audio DSP)
 #
 # Only the `capture` member needs the UHD toolchain. Everything else builds and
 # tests on a host with no libuhd installed, so CI can run the full DSP suite:
 #   cargo test --workspace --no-default-features
 [workspace]
 resolver = "2"
-members = ["common", "capture", "channelizer", "fixture", "sink"]
+members = ["common", "capture", "channelizer", "fixture", "sink", "demod"]
 
 [workspace.package]
 version = "0.1.0"

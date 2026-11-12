@@ -1,0 +1,15 @@
+[package]
+name = "sigproc-demod"
+version.workspace = true
+edition.workspace = true
+description = "Stateful narrowband IQ to mono audio demodulation and recording service"
+
+[dependencies]
+sigproc-common = { path = "../common" }
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ctrlc = { version = "3", features = ["termination"] }

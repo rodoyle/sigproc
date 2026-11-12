@@ -1,0 +1,9 @@
+# Optional non-persistent storage:
+# kubectl patch deployment sigproc-demod --type strategic \
+#   --patch-file deploy/demod-emptydir-patch.yaml
+spec:
+  template:
+    spec:
+      volumes:
+        - name: recordings
+          emptyDir: {}

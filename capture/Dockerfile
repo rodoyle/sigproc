@@ -37,11 +37,13 @@ COPY capture/Cargo.toml capture/
 COPY channelizer/Cargo.toml channelizer/
 COPY fixture/Cargo.toml fixture/
 COPY sink/Cargo.toml sink/
+COPY demod/Cargo.toml demod/
 COPY common/src/ common/src/
 COPY capture/src/ capture/src/
 COPY channelizer/src/ channelizer/src/
 COPY fixture/src/ fixture/src/
 COPY sink/src/ sink/src/
+COPY demod/src/ demod/src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 3: Builder — UHD, cached deps, then the crate ──────────────────────
@@ -101,6 +103,7 @@ COPY capture/ capture/
 COPY channelizer/ channelizer/
 COPY fixture/ fixture/
 COPY sink/ sink/
+COPY demod/ demod/
 # --features uhd-support is REQUIRED: it is opt-in rather than a default feature,
 # because cargo-chef cooks the whole workspace and a default-on uhd-support made
 # the UHD-free service images try to build uhd-sys without libuhd.

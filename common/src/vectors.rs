@@ -1,17 +1,11 @@
 //! Deterministic signal vectors, shared by the fixture generator, the gates and
 //! the unit tests.
 //!
-//! Every gate in this repo has to assert on *known* input. Generating that input
-//! here — rather than inside a test — means the fixture binary and the tests use
-//! the same generator, so a gate failure can never be blamed on the test having
-//! its own private idea of what the signal was.
-//!
-//! The modulation is plain AM/DSB: a carrier with its amplitude varied by a tone,
-//! i.e. `A (1 + m cos(2 pi f_m t)) e^(j 2 pi f_c t)`. That is the signal an
-//! envelope detector recovers, and it produces a baseband vector whose *envelope*
-//! carries a single known tone — which is exactly what the verification gates
-//! measure.
-
+//! Every gate asserts on known input. Generating that input here — rather than
+//! inside a test — means the fixture binary and tests use the same generator.
+//! NBFM vectors carry a tone in instantaneous frequency with constant envelope;
+//! AM/DSB vectors carry it in the envelope of a carrier-present signal. Neither
+//! generator represents suppressed-carrier USB/SSB.
 use crate::dsp::{iq_to_sc16, Iq};
 use crate::vita49::build_packet;
 use std::f64::consts::TAU;
@@ -62,6 +56,46 @@ impl AmTone {
                 Iq::new(
                     (envelope * phase.cos()) as f32,
                     (envelope * phase.sin()) as f32,
+                )
+            })
+            .collect()
+    }
+}
+
+/// Specification of a deterministic constant-envelope NBFM test signal.
+///
+/// The instantaneous frequency is `offset_hz + deviation_hz*cos(2*pi*tone_hz*t)`.
+/// The carrier amplitude is constant, so an envelope detector cannot recover the
+/// modulation and this vector meaningfully distinguishes FM from AM/DSB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NbfmTone {
+    pub tone_hz: f64,
+    pub offset_hz: f64,
+    pub sample_rate: f64,
+    pub seconds: f64,
+    pub deviation_hz: f64,
+    pub amplitude: f64,
+}
+
+impl NbfmTone {
+    pub fn samples(&self) -> usize {
+        (self.seconds * self.sample_rate).round().max(0.0) as usize
+    }
+
+    pub fn peak_amplitude(&self) -> f64 {
+        self.amplitude
+    }
+
+    pub fn generate(&self) -> Vec<Iq> {
+        let modulation_index = self.deviation_hz / self.tone_hz;
+        (0..self.samples())
+            .map(|k| {
+                let t = k as f64 / self.sample_rate;
+                let phase = TAU * self.offset_hz * t
+                    + modulation_index * (TAU * self.tone_hz * t).sin();
+                Iq::new(
+                    (self.amplitude * phase.cos()) as f32,
+                    (self.amplitude * phase.sin()) as f32,
                 )
             })
             .collect()

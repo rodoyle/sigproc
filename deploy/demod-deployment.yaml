@@ -1,0 +1,87 @@
+# Standalone NBFM-first demod; consumes UDP only and never opens UHD.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sigproc-demod
+  namespace: default
+  labels:
+    app: sigproc-demod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sigproc-demod
+  template:
+    metadata:
+      labels:
+        app: sigproc-demod
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sigproc
+                topologyKey: kubernetes.io/hostname
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: demod
+          image: ghcr.io/rodoyle/sigproc-demod:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: sigproc-demod-config
+          args:
+            - --segment-samples=3000000
+            - --max-recordings=24
+          ports:
+            - name: vita49-in
+              containerPort: 4930
+              protocol: UDP
+            - name: metrics
+              containerPort: 9093
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "96Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: recordings
+              mountPath: /recordings
+      volumes:
+        - name: recordings
+          persistentVolumeClaim:
+            claimName: sigproc-demod-recordings
