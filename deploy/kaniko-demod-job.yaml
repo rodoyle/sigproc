@@ -1,0 +1,91 @@
+# Rebuild only the standalone demod image from the pushed repository HEAD.
+# Apply: kubectl apply -f deploy/kaniko-demod-job.yaml
+# Re-run: kubectl -n build delete job kaniko-build-sigproc-demod
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build-sigproc-demod
+  namespace: build
+  labels:
+    app: sigproc-demod
+    type: kaniko-build
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: sigproc-demod-build
+        type: kaniko-build
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["rpi-four-2"]
+      restartPolicy: Never
+      initContainers:
+        - name: git-clone
+          image: alpine/git:latest
+          command:
+            - sh
+            - -c
+            - |
+              REPO=https://github.com/rodoyle/sigproc.git
+              git clone --depth 1 "$REPO" /workspace
+              git -C /workspace rev-parse HEAD
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        - name: stage-kaniko-creds
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /kaniko-scratch/.docker
+              cp /secret/.dockerconfigjson /kaniko-scratch/.docker/config.json
+              chmod 0600 /kaniko-scratch/.docker/config.json
+          volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        - name: build-demod
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=demod/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-demod:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+      containers:
+        - name: report
+          image: busybox:latest
+          command: ["sh", "-c", "echo demod image built and pushed"]
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: kaniko-secret
+          secret:
+            secretName: ghcr-push
+            items:
+              - key: .dockerconfigjson
+                path: .dockerconfigjson
+        - name: kaniko-scratch
+          persistentVolumeClaim:
+            claimName: kaniko-scratch
