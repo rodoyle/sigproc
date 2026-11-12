@@ -67,12 +67,24 @@ is no longer used. Layout cross-check: SoapyVITA49 `src/Control.hpp` and
 `src/Control.cpp`, revision `6f209e47812424fb2038a83e30ba5613f68c2725`:
 https://github.com/alphafox02/SoapyVITA49/tree/6f209e47812424fb2038a83e30ba5613f68c2725
 
-CAM action is bits24:23: execute=2. Bit19 requests/reports execution ACK.
-Bits31/29 indicate controllee/controller IDs, bits30/28 their UUID form.
-This endpoint accepts optional 32-bit IDs, immediate execute, and only the four
-fields: RF frequency, sample rate, bandwidth, gain. It checks a supplied
-controllee ID against the stream ID. It does not implement query-state, dry-run,
-scheduling, cancellation, UUID addressing, state/event, or other settings.
+CAM action is bits24:23: execute=2, no-action=0. Bit19 requests/reports execution
+ACK; bit18 requests/reports query-state. Bits31/29 indicate controllee/controller
+IDs, bits30/28 their UUID form. This endpoint accepts optional 32-bit IDs and
+only four fields: RF frequency, sample rate, bandwidth, gain. It checks a supplied
+controllee ID against the stream ID.
+
+A no-action query-state request returns the last confirmed settings without
+calling UHD, stopping/recreating the streamer, or announcing a context change.
+Requested CIF0 fields must be nonempty and supported; zeroed query field bodies
+are not applied or range-checked as requested values. A successful query ACK sets
+bit18, not execution bit19 or executed bit10. The reply includes all four
+confirmed fields. This enables SoapyVITA49's initial state probe at a reachable
+control endpoint; it does not establish Windows/GUI or live-radio interoperability.
+
+Immediate execute remains the only hardware-changing mode. Query combined with
+execute or dry-run is rejected rather than ambiguously applied. Dry-run remains
+unsupported: generic range checks cannot prove hardware capability. Scheduling,
+cancellation, UUID addressing, state/event, and other settings are unsupported.
 A well-framed unsupported command receives an execution ACK with CAM error
 indicator bit16, no executed bit10, echoed Message ID/IDs, and unchanged confirmed
 settings. Mixed supported/unsupported requests apply **nothing**. Nonpositive Hz
@@ -104,14 +116,21 @@ This is one exact source-IP/port allowlist, **not cryptographic authentication o
 replay protection**. Remote exposure requires trusted-network/firewall controls.
 Data destination is separately configured under `[forwarding]`; multicast joins
 are data subscriptions and do not authorize hardware control. The controller
-must bind its configured source port. SoapyVITA49's automatic query probe is not
-implemented: desktop control integration remains explicitly unproven/deferred.
+must bind its configured source port. SoapyVITA49 uses an ephemeral local UDP
+port and defaults control to its discovered data address/port; neither matches
+this collector's loopback-only control endpoint. Desktop control integration
+therefore remains unproven until an explicit compatible route is configured.
+Do not send a probe to the multicast data endpoint expecting hardware control.
 
-The sole capture thread polls bounded UDP batches between UHD reads. The Rust
-UHD API borrows the device while a streamer exists: stop/drop the streamer,
-apply/read back on the same owner thread, then recreate it. This interrupts
-capture even for an authorized request later rejected. No second UHD device
-handle is opened for control. Default RX channel remains zero.
+The sole capture thread polls bounded UDP batches between UHD reads. It prepares
+commands while the streamer is alive and directly answers queries/rejections or
+drops malformed packets. Only a validated immediate execute returns an opaque
+pending request. The Rust UHD API borrows the device while a streamer exists:
+stop/drop it, consume the pending request on the same owner thread, apply/read
+back, then recreate the streamer. A stale/foreign pending request is rejected
+before hardware access. Valid executes interrupt capture even at the current
+frequency; queries, invalid and unsupported requests do not restart streaming.
+No second UHD device handle is opened. Default RX channel remains zero.
 The Deployment source uses one replica and `Recreate` (no rolling-update surge)
 so replacing this collector does not start two competing B210 owners. That
 source change alone is not a claim that the lab Deployment has been updated.

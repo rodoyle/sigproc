@@ -3,6 +3,7 @@ use super::{hz_q20, ParseError, StreamContext};
 
 const ACK_HEADER: u32 = 1 << 26;
 const CAM_EXECUTE: u32 = 2 << 23;
+const CAM_QUERY_STATE: u32 = 1 << 18;
 const CAM_EXECUTION_ACK: u32 = 1 << 19;
 const CAM_EXECUTED: u32 = 1 << 10;
 const CAM_ERRORS: u32 = 1 << 16;
@@ -38,6 +39,23 @@ pub struct Controllee {
     pub applied: StreamContext,
     stream_id: u32,
     packet_count: u8,
+}
+
+/// Preparation never calls hardware. Only `Execute` requires releasing the RX
+/// streamer; queries and rejected commands can be answered while it is alive.
+pub enum PreparedControl {
+    Reply(Vec<u8>),
+    Execute(PendingExecute),
+}
+
+/// A consumed, opaque execute request bound to the validated stream/settings.
+/// Preparation and execution run on the sole capture thread. A stale or foreign
+/// request fails closed before calling hardware; this is not replay protection.
+pub struct PendingExecute {
+    stream_id: u32,
+    before: StreamContext,
+    requested: StreamContext,
+    command: ParsedCommand,
 }
 
 pub(super) struct ParsedCommand {
@@ -148,7 +166,7 @@ pub(super) fn parse_command(buf: &[u8]) -> Result<ParsedCommand, ParseError> {
             if cam & CAM_ERRORS != 0 {
                 CAM_ACK_REJECTED
             } else {
-                CAM_ACK_APPLIED
+                if cam & CAM_EXECUTED != 0 { CAM_ACK_APPLIED } else { 0 }
             }
         } else {
             (cam >> 23) & 3
@@ -179,21 +197,30 @@ impl Controllee {
         }
     }
 
-    /// Immediate execute only. Unsupported fields/modes receive an error ACK
-    /// with the Message ID echoed and the last confirmed settings unchanged.
-    pub fn handle<B: ControlBackend>(
-        &mut self,
-        datagram: &[u8],
-        backend: &mut B,
-    ) -> anyhow::Result<Vec<u8>> {
+    /// Validate once without a backend. Only a supported, well-formed immediate
+    /// execute may require stopping capture. Query-state uses confirmed values;
+    /// its zeroed field bodies are not requests to change the receiver.
+    pub fn prepare(&mut self, datagram: &[u8]) -> anyhow::Result<PreparedControl> {
         let cmd = parse_command(datagram)?;
-        let unsupported = cmd.stream_id != self.stream_id
-            || cmd.controllee_id.is_some_and(|id| id != self.stream_id)
-            || cmd.header & ((1 << 26) | (1 << 24) | (1 << 25)) != 0
-            || (cmd.cam >> 23) & 3 != 2
-            || cmd.cam & ((1 << 30) | (1 << 28) | (1 << 18) | (7 << 12)) != 0
-            || cmd.cif0 == 0
-            || cmd.cif0 & !SUPPORTED != 0;
+        let action = (cmd.cam >> 23) & 3;
+        let query = cmd.cam & CAM_QUERY_STATE != 0;
+        let identity_ok = cmd.stream_id == self.stream_id
+            && cmd.controllee_id.is_none_or(|id| id == self.stream_id);
+        let header_ok = cmd.header & ((1 << 26) | (1 << 24) | (1 << 25)) == 0;
+        let cam_ok = cmd.cam & ((1 << 30) | (1 << 28) | (7 << 12)) == 0;
+        let fields_ok = cmd.cif0 != 0 && cmd.cif0 & !SUPPORTED == 0;
+        if !identity_ok || !header_ok || !cam_ok || !fields_ok {
+            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
+        }
+        if action == 0 && query {
+            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_QUERY_STATE)));
+        }
+        // Dry-run remains unsupported: generic range checks cannot establish
+        // whether UHD can apply a setting. Contradictory query/action modes
+        // must never be treated as hardware-changing commands.
+        if action != 2 || query {
+            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
+        }
         let before = self.applied;
         let requested = StreamContext {
             rf_freq_hz: cmd.update.rf_freq_hz.unwrap_or(before.rf_freq_hz),
@@ -201,19 +228,49 @@ impl Controllee {
             bandwidth_hz: cmd.update.bandwidth_hz.unwrap_or(before.bandwidth_hz),
             gain_db: cmd.update.gain_db.unwrap_or(before.gain_db),
         };
-        let mut cam = CAM_EXECUTION_ACK;
-        if unsupported || !valid(requested) {
-            cam |= CAM_ERRORS;
-        } else {
-            let applied = backend.apply_and_readback(cmd.update)?;
-            anyhow::ensure!(valid(applied), "invalid hardware control readback");
-            self.applied = applied;
-            cam |= CAM_EXECUTED;
-            if applied != requested {
-                cam |= 1 << 11;
-            }
+        if !valid(requested) {
+            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
         }
-        Ok(self.ack(&cmd, cam))
+        Ok(PreparedControl::Execute(PendingExecute {
+            stream_id: self.stream_id,
+            before,
+            requested,
+            command: cmd,
+        }))
+    }
+
+    /// Apply one prepared execute after releasing the streamer. The backend
+    /// failure contract is unchanged: terminate capture rather than advertise
+    /// unconfirmed hardware state. No applied ACK is produced on failure.
+    pub fn execute<B: ControlBackend>(
+        &mut self,
+        pending: PendingExecute,
+        backend: &mut B,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            pending.stream_id == self.stream_id && pending.before == self.applied,
+            "stale or foreign prepared control request"
+        );
+        let applied = backend.apply_and_readback(pending.command.update)?;
+        anyhow::ensure!(valid(applied), "invalid hardware control readback");
+        self.applied = applied;
+        let mut cam = CAM_EXECUTION_ACK | CAM_EXECUTED;
+        if applied != pending.requested {
+            cam |= 1 << 11;
+        }
+        Ok(self.ack(&pending.command, cam))
+    }
+
+    /// Compatibility wrapper for clients that do not hold an RX streamer.
+    pub fn handle<B: ControlBackend>(
+        &mut self,
+        datagram: &[u8],
+        backend: &mut B,
+    ) -> anyhow::Result<Vec<u8>> {
+        match self.prepare(datagram)? {
+            PreparedControl::Reply(ack) => Ok(ack),
+            PreparedControl::Execute(pending) => self.execute(pending, backend),
+        }
     }
 
     fn ack(&mut self, cmd: &ParsedCommand, cam: u32) -> Vec<u8> {

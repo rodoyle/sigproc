@@ -1,7 +1,7 @@
 //! Bounded UDP polling; hardware dispatch stays on the capture owner thread.
 use sigproc_common::{
     config::ControlConfig,
-    vita49::{ControlBackend, Controllee, ParseError},
+    vita49::{ControlBackend, Controllee, ParseError, PendingExecute, PreparedControl},
 };
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
@@ -45,27 +45,73 @@ impl ControlSocket {
         Ok(None)
     }
 
-    /// Backend failures are fatal to the owner loop: no applied ACK is emitted
-    /// and capture must not continue after a possibly partial hardware change.
-    pub fn dispatch<B: ControlBackend>(
+    /// Answer queries/rejections while RX is alive. A pending execute is the
+    /// only reason for the owner loop to stop/drop the streamer.
+    pub fn prepare(
+        &self,
+        datagram: &[u8],
+        controllee: &mut Controllee,
+    ) -> anyhow::Result<Option<PendingExecute>> {
+        match controllee.prepare(datagram) {
+            Ok(PreparedControl::Reply(ack)) => {
+                self.send_ack(&ack);
+                Ok(None)
+            }
+            Ok(PreparedControl::Execute(pending)) => Ok(Some(pending)),
+            Err(e) if e.downcast_ref::<ParseError>().is_some() => {
+                log::warn!("malformed control datagram dropped: {e}");
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The streaming-phase transition, shared with hardware-free lifecycle
+    /// tests. No query/rejection may call `stop`; stop failure cannot produce
+    /// a pending execute or an applied acknowledgement.
+    pub fn prepare_streaming(
+        &self,
+        datagram: &[u8],
+        controllee: &mut Controllee,
+        stop: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Option<PendingExecute>> {
+        let pending = self.prepare(datagram, controllee)?;
+        if pending.is_some() {
+            stop()?;
+        }
+        Ok(pending)
+    }
+
+    /// Hardware failures are fatal; never send an applied ACK for a failed
+    /// or partially applied update. Call only after releasing the streamer.
+    pub fn execute<B: ControlBackend>(
+        &self,
+        pending: PendingExecute,
+        controllee: &mut Controllee,
+        backend: &mut B,
+    ) -> anyhow::Result<()> {
+        let ack = controllee.execute(pending, backend)?;
+        self.send_ack(&ack);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn dispatch<B: ControlBackend>(
         &self,
         datagram: &[u8],
         controllee: &mut Controllee,
         backend: &mut B,
     ) -> anyhow::Result<()> {
-        match controllee.handle(datagram, backend) {
-            Ok(ack) => {
-                // A lost ACK must not roll back successfully applied hardware.
-                if let Err(e) = self.socket.send_to(&ack, self.peer) {
-                    log::warn!("control acknowledgement send failed: {e}");
-                }
-                Ok(())
-            }
-            Err(e) if e.downcast_ref::<ParseError>().is_some() => {
-                log::warn!("malformed control datagram dropped: {e}");
-                Ok(())
-            }
-            Err(e) => Err(e),
+        if let Some(pending) = self.prepare(datagram, controllee)? {
+            self.execute(pending, controllee, backend)?;
+        }
+        Ok(())
+    }
+
+    fn send_ack(&self, ack: &[u8]) {
+        // A lost ACK must not roll back successfully applied hardware.
+        if let Err(e) = self.socket.send_to(ack, self.peer) {
+            log::warn!("control acknowledgement send failed: {e}");
         }
     }
 }

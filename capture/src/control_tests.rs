@@ -264,7 +264,12 @@ fn python_rate_client_talks_to_real_udp_controllee() {
     };
     let control_port = endpoint.socket.local_addr().unwrap().port();
     let client = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/vrt_set_rate.py");
-    let mut child = std::process::Command::new("python3")
+    // An explicit override is authoritative; otherwise use the platform's
+    // conventional Python 3 executable (Windows does not ship `python3`).
+    let python = std::env::var_os("SIGPROC_TEST_PYTHON").unwrap_or_else(|| {
+        if cfg!(windows) { "python" } else { "python3" }.into()
+    });
+    let mut child = std::process::Command::new(python)
         .arg(client)
         .args([
             "250000",
@@ -312,4 +317,227 @@ fn default_control_endpoint_is_disabled() {
     assert!(ControlSocket::bind(&ControlConfig::default())
         .unwrap()
         .is_none());
+}
+
+/// Build the query-state command a Soapy client sends on open: no action, the
+/// query-state request bit, and zeroed field bodies for the requested fields.
+fn query_command(stream_id: u32, cif0: u32, message_id: u32) -> Vec<u8> {
+    let body_bytes = [(1u32 << 29, 8usize), (1 << 27, 8), (1 << 23, 4), (1 << 21, 8)]
+        .iter()
+        .filter(|(bit, _)| cif0 & bit != 0)
+        .map(|(_, size)| size)
+        .sum::<usize>();
+    let mut buf = Vec::new();
+    let header = (6u32 << 28) | (6 + body_bytes as u32 / 4);
+    for value in [
+        header,
+        stream_id,
+        (1 << 31) | (1 << 18),
+        message_id,
+        stream_id,
+        cif0,
+    ] {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+    buf.extend(std::iter::repeat_n(0u8, body_bytes));
+    buf
+}
+
+#[test]
+fn query_state_answers_from_confirmed_state_without_touching_hardware() {
+    let (endpoint, peer, mut ctl, backend) = harness();
+    let cif0 = (1 << 29) | (1 << 27) | (1 << 23) | (1 << 21);
+    let request = query_command(17, cif0, 42);
+    peer.send_to(&request, endpoint.socket.local_addr().unwrap())
+        .unwrap();
+    assert!(endpoint
+        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("query stopped RX"))
+        .unwrap()
+        .is_none(), "query must not request a streamer restart");
+    let reply = receive(&peer);
+
+    assert_eq!(word(&reply, 4), 17, "stream id echoed");
+    // The request carried a controllee ID, so the acknowledgement echoes it and
+    // every later word shifts by one.
+    let cam = word(&reply, 20);
+    assert_eq!(cam & (1 << 16), 0, "query must not report errors");
+    assert_ne!(cam & (1 << 18), 0, "query-state acknowledgement bit");
+    assert_eq!(cam & ((1 << 19) | (1 << 10)), 0, "query must not claim execution");
+    assert_eq!(word(&reply, 24), 42, "message id echoed");
+    assert_eq!(word(&reply, 32), cif0, "supported fields reported");
+    assert_eq!(hz(&reply, 36), 1e6, "bandwidth from confirmed state");
+    assert_eq!(hz(&reply, 44), 100e6, "rf frequency from confirmed state");
+    assert_eq!(hz(&reply, 56), 1e6, "sample rate from confirmed state");
+    assert_eq!(word(&reply, 52) as u16 as i16 as f64 / 128.0, 10.0, "gain from confirmed state");
+    assert!(
+        backend.calls.is_empty(),
+        "a query must never reach the radio"
+    );
+    assert_eq!(ctl.applied, initial(), "a query must not mutate state");
+
+    let request = query_command(17, 1 << 27, 43);
+    peer.send_to(&request, endpoint.socket.local_addr().unwrap()).unwrap();
+    assert!(endpoint
+        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("subset query stopped RX"))
+        .unwrap()
+        .is_none());
+    let reply = receive(&peer);
+    assert_eq!(word(&reply, 24), 43);
+    assert_eq!(word(&reply, 20) & ((1 << 19) | (1 << 10) | (1 << 16)), 0);
+    assert_eq!(hz(&reply, 44), initial().rf_freq_hz);
+    assert!(backend.calls.is_empty());
+}
+
+#[test]
+fn unsupported_dry_run_never_applies_even_with_valid_values() {
+    let (endpoint, peer, mut ctl, mut backend) = harness();
+    let mut request = vita49::hand_command(17, 1 << 27, &q20(433e6));
+    // Rewrite the CAM action from execute (2) to dry run (1).
+    let cam = (word(&request, 8) & !(3 << 23)) | (1 << 23);
+    request[8..12].copy_from_slice(&cam.to_be_bytes());
+    peer.send_to(&request, endpoint.socket.local_addr().unwrap())
+        .unwrap();
+    endpoint
+        .dispatch(&poll(&endpoint), &mut ctl, &mut backend)
+        .unwrap();
+    let reply = receive(&peer);
+
+    let cam = word(&reply, 20);
+    assert_ne!(cam & (1 << 16), 0, "dry-run is not hardware validation");
+    assert_eq!(cam & (1 << 10), 0, "a dry run executes nothing");
+    assert_eq!(hz(&reply, 40), 100e6, "dry run reports unapplied state");
+    assert!(backend.calls.is_empty(), "a dry run must not reach the radio");
+    assert_eq!(ctl.applied, initial(), "a dry run must not mutate state");
+
+    let mut bad = vita49::hand_command(17, 1 << 27, &q20(-5.0));
+    let cam = (word(&bad, 8) & !(3 << 23)) | (1 << 23);
+    bad[8..12].copy_from_slice(&cam.to_be_bytes());
+    peer.send_to(&bad, endpoint.socket.local_addr().unwrap())
+        .unwrap();
+    endpoint
+        .dispatch(&poll(&endpoint), &mut ctl, &mut backend)
+        .unwrap();
+    let reply = receive(&peer);
+    assert_ne!(
+        word(&reply, 20) & (1 << 16),
+        0,
+        "an invalid dry run must be rejected"
+    );
+    assert!(backend.calls.is_empty());
+}
+
+#[test]
+fn no_action_without_query_request_is_rejected() {
+    let (endpoint, peer, mut ctl, mut backend) = harness();
+    let mut request = vita49::hand_command(17, 1 << 27, &q20(915e6));
+    let cam = word(&request, 8) & !(3 << 23);
+    request[8..12].copy_from_slice(&cam.to_be_bytes());
+    peer.send_to(&request, endpoint.socket.local_addr().unwrap())
+        .unwrap();
+    endpoint
+        .dispatch(&poll(&endpoint), &mut ctl, &mut backend)
+        .unwrap();
+    let reply = receive(&peer);
+    assert_ne!(word(&reply, 20) & (1 << 16), 0);
+    assert!(backend.calls.is_empty());
+    assert_eq!(ctl.applied, initial());
+}
+
+#[test]
+fn only_validated_execute_requests_a_streamer_restart() {
+    let (endpoint, peer, mut ctl, mut backend) = harness();
+    let valid = vita49::hand_command(17, 1 << 27, &q20(915e6));
+    let mut cases = vec![
+        vita49::hand_command(99, 1 << 27, &q20(915e6)),
+        vita49::hand_command(17, 1 << 26, &[0; 8]),
+        vita49::hand_command(17, (1 << 27) | (1 << 26), &[0; 16]),
+        vita49::hand_command(17, 1 << 27, &q20(-1.0)),
+        vita49::hand_command(17, 0, &[]),
+        query_command(17, 0, 1),
+    ];
+    for action in [0u32, 1, 3] {
+        let mut request = valid.clone();
+        let cam = (word(&request, 8) & !(3 << 23)) | (action << 23);
+        request[8..12].copy_from_slice(&cam.to_be_bytes());
+        cases.push(request);
+    }
+    for action in [1u32, 2, 3] {
+        let mut request = valid.clone();
+        let cam = (action << 23) | (1 << 18);
+        request[8..12].copy_from_slice(&cam.to_be_bytes());
+        cases.push(request);
+    }
+    let mut foreign_controllee = query_command(17, 1 << 27, 3);
+    foreign_controllee[16..20].copy_from_slice(&99u32.to_be_bytes());
+    cases.push(foreign_controllee);
+    let mut cancelled = valid.clone();
+    let header = word(&cancelled, 0) | (1 << 24);
+    cancelled[..4].copy_from_slice(&header.to_be_bytes());
+    cases.push(cancelled);
+    for request in cases {
+        peer.send_to(&request, endpoint.socket.local_addr().unwrap()).unwrap();
+        assert!(endpoint.prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("rejected control stopped RX")).unwrap().is_none());
+        let ack = receive(&peer);
+        assert_eq!(word(&ack, 20) & (1 << 10), 0, "nonmutating ACK cannot claim execute");
+        assert_ne!(word(&ack, 20) & (1 << 16), 0, "invalid/unsupported request must reject");
+        assert!(backend.calls.is_empty());
+        assert_eq!(ctl.applied, initial());
+    }
+
+    // Malformed packets are dropped and must not stop the streamer either.
+    peer.send_to(&[0; 7], endpoint.socket.local_addr().unwrap()).unwrap();
+    assert!(endpoint.prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("malformed control stopped RX")).unwrap().is_none());
+    assert!(peer.recv(&mut [0; 256]).is_err());
+
+    peer.send_to(&valid, endpoint.socket.local_addr().unwrap()).unwrap();
+    let mut stops = 0;
+    let pending = endpoint
+        .prepare_streaming(&poll(&endpoint), &mut ctl, || {
+            stops += 1;
+            Ok(())
+        })
+        .unwrap()
+        .expect("only a validated execute requests streamer release");
+    assert_eq!(stops, 1, "valid execute must stop RX exactly once");
+    assert!(backend.calls.is_empty(), "preparation must not reach hardware");
+    assert_eq!(ctl.applied, initial());
+    assert!(peer.recv(&mut [0; 256]).is_err(), "no ACK before hardware readback");
+    endpoint.execute(pending, &mut ctl, &mut backend).unwrap();
+    let ack = receive(&peer);
+    assert_ne!(word(&ack, 20) & (1 << 10), 0);
+    assert_eq!(backend.calls.len(), 1);
+    assert_eq!(hz(&ack, 40), 915e6 + 10.0, "ACK contains backend readback");
+}
+
+#[test]
+fn prepared_execute_cannot_apply_to_changed_or_foreign_state() {
+    for foreign in [false, true] {
+        let (endpoint, _, mut ctl, mut backend) = harness();
+        let request = vita49::hand_command(17, 1 << 27, &q20(915e6));
+        let pending = endpoint.prepare(&request, &mut ctl).unwrap().unwrap();
+        let mut target = if foreign {
+            Controllee::new(initial(), 99)
+        } else {
+            ctl.applied.sample_rate_hz = 2e6;
+            ctl
+        };
+        assert!(endpoint.execute(pending, &mut target, &mut backend).is_err());
+        assert!(backend.calls.is_empty(), "stale plan must fail before hardware");
+    }
+}
+
+#[test]
+fn streamer_stop_failure_cannot_proceed_to_hardware_or_ack() {
+    let (endpoint, peer, mut ctl, backend) = harness();
+    let request = vita49::hand_command(17, 1 << 27, &q20(915e6));
+    let mut stops = 0;
+    let result = endpoint.prepare_streaming(&request, &mut ctl, || {
+        stops += 1;
+        anyhow::bail!("streamer failed to stop")
+    });
+    assert!(result.is_err());
+    assert_eq!(stops, 1);
+    assert_eq!(ctl.applied, initial());
+    assert!(backend.calls.is_empty());
+    assert!(peer.recv(&mut [0; 256]).is_err(), "no ACK before apply/readback");
 }

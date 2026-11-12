@@ -846,7 +846,7 @@ impl<'a> PacketCursor<'a> {
 /// VITA 49.2 bounded command profile; framing is shared with capture's control socket.
 #[path = "vita49_control.rs"]
 mod control;
-pub use control::{hand_command, ControlBackend, ControlUpdate, Controllee};
+pub use control::{hand_command, ControlBackend, ControlUpdate, Controllee, PendingExecute, PreparedControl};
 #[cfg(test)]
 use control::{parse_command, CAM_ACK_APPLIED, CAM_ACK_REJECTED, CIF0_REFERENCE_LEVEL};
 #[cfg(test)]
@@ -1428,6 +1428,51 @@ mod tests {
             parse(&bad),
             Err(ParseError::LengthMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn prepared_control_query_is_read_only_and_execute_is_state_bound() {
+        let start = StreamContext {
+            rf_freq_hz: 100e6,
+            sample_rate_hz: 1e6,
+            bandwidth_hz: 1e6,
+            gain_db: 10.0,
+        };
+        let mut ctl = Controllee::new(start, 17);
+        let mut backend = start;
+        // Independent Soapy-style RF-only query; no repository encoder.
+        let query: Vec<u8> = [0x60000008u32, 17, 0x80040000, 43, 17, 0x08000000, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect();
+        let PreparedControl::Reply(ack) = ctl.prepare(&query).unwrap() else {
+            panic!("query cannot prepare hardware execution");
+        };
+        let decoded = parse_command(&ack).unwrap();
+        assert_eq!(decoded.action, 0, "query ACK must not be classified as applied");
+        assert_eq!(&ack[44..52], &hz_q20(start.rf_freq_hz).to_be_bytes());
+        let gain = u32::from_be_bytes(ack[52..56].try_into().unwrap());
+        assert_eq!(gain as u16 as i16 as f64 / 128.0, start.gain_db);
+        assert_eq!(ctl.applied, start);
+        assert_eq!(backend, start);
+
+        let request = hand_command(17, CIF0_RF_REF_FREQ, &hz_q20(915e6).to_be_bytes());
+        let PreparedControl::Execute(pending) = ctl.prepare(&request).unwrap() else {
+            panic!("valid execute must prepare hardware execution");
+        };
+        assert_eq!(ctl.applied, start, "preparation cannot mutate settings");
+        let ack = ctl.execute(pending, &mut backend).unwrap();
+        assert_eq!(parse_command(&ack).unwrap().action, CAM_ACK_APPLIED);
+        assert_eq!(ctl.applied.rf_freq_hz, 915e6);
+        assert_eq!(backend, ctl.applied);
+
+        let PreparedControl::Execute(pending) = ctl.prepare(&request).unwrap() else {
+            panic!("valid execute must prepare hardware execution");
+        };
+        let before = backend;
+        ctl.applied.sample_rate_hz = 2e6;
+        assert!(ctl.execute(pending, &mut backend).is_err());
+        assert_eq!(backend, before, "stale plan must not call backend");
     }
 
     #[test]

@@ -157,17 +157,25 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     loop {
         // UHD borrows Usrp for the streamer's lifetime. Stop/drop before
         // applying controls on this same owner thread; never open a second radio.
-        let datagram = {
+        let pending = {
             let mut streamer = capture::create_rx_streamer(&mut usrp)?;
             loop {
                 if let Some(endpoint) = &control_socket {
                     if let Some(datagram) = endpoint.poll()? {
                         metrics.control();
-                        streamer.send_command(&uhd::StreamCommand {
-                            time: uhd::StreamTime::Now,
-                            command_type: uhd::StreamCommandType::StopContinuous,
-                        })?;
-                        break datagram;
+                        if let Some(pending) = endpoint.prepare_streaming(
+                            &datagram,
+                            &mut controllee,
+                            || {
+                                streamer.send_command(&uhd::StreamCommand {
+                                    time: uhd::StreamTime::Now,
+                                    command_type: uhd::StreamCommandType::StopContinuous,
+                                })?;
+                                Ok(())
+                            },
+                        )? {
+                            break pending;
+                        }
                     }
                 }
                 match capture::read_batch(&mut streamer) {
@@ -197,8 +205,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         };
         if let Some(endpoint) = &control_socket {
-            endpoint.dispatch(
-                &datagram,
+            endpoint.execute(
+                pending,
                 &mut controllee,
                 &mut uhd_control::UhdControl(&mut usrp),
             )?;
