@@ -28,3 +28,4 @@ data:
     [channel]
     offset_hz = 200_000.0
     output_rate_hz = 50_000.0
+    passband_hz = 6_250.0

@@ -42,3 +42,5 @@ data:
     # config loader refuses it with that reason.
     offset_hz = 200_000.0
     output_rate_hz = 50_000.0
+    # 6.25 kHz half-width gives the selected channel a 12.5 kHz total bandwidth.
+    passband_hz = 6_250.0
