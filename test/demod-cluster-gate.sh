@@ -57,7 +57,7 @@ POD=$(kubectl -n "$NS" get pod -l app=sigproc-demod \
 rm -rf "$OUT"
 mkdir -p "$OUT"
 printf '%s\n' "$PREVIOUS_SIDECARS" > "$OUT/previous-sidecars.txt"
-kubectl -n "$NS" cp "$NS/$POD:/recordings" "$OUT/recordings"
+MSYS_NO_PATHCONV=1 kubectl -n "$NS" cp "$NS/$POD:/recordings" "$OUT/recordings"
 
 "$PYTHON" - "$OUT/recordings" "$OUT/previous-sidecars.txt" <<'PY'
 import json
