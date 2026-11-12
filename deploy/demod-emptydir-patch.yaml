@@ -7,3 +7,4 @@ spec:
       volumes:
         - name: recordings
           emptyDir: {}
+          persistentVolumeClaim: null

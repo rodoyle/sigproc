@@ -34,6 +34,8 @@ fi
 # Reset demod counters after any live packets and before the deterministic run.
 kubectl -n "$NS" delete pod -l app=sigproc-demod --wait --timeout=120s >/dev/null
 kubectl -n "$NS" rollout status deploy/sigproc-demod --timeout=180s >/dev/null
+PREVIOUS_SIDECARS=$(kubectl -n "$NS" exec deploy/sigproc-demod -- \
+  sh -c 'ls -1 /recordings/sigproc-demod-*.json 2>/dev/null || true')
 kubectl -n "$NS" delete job "$JOB" --ignore-not-found >/dev/null
 kubectl -n "$NS" apply -f deploy/demod-gate-job.yaml >/dev/null
 kubectl -n "$NS" wait --for=condition=complete "job/$JOB" --timeout=300s >/dev/null
@@ -54,29 +56,49 @@ POD=$(kubectl -n "$NS" get pod -l app=sigproc-demod \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 rm -rf "$OUT"
 mkdir -p "$OUT"
+printf '%s\n' "$PREVIOUS_SIDECARS" > "$OUT/previous-sidecars.txt"
 kubectl -n "$NS" cp "$NS/$POD:/recordings" "$OUT/recordings"
 
-"$PYTHON" - "$OUT/recordings" <<'PY'
+"$PYTHON" - "$OUT/recordings" "$OUT/previous-sidecars.txt" <<'PY'
 import json
 import math
 import pathlib
 import sys
 import wave
 root = pathlib.Path(sys.argv[1])
+baseline = {
+    line.strip().rsplit("/", 1)[-1]
+    for line in pathlib.Path(sys.argv[2]).read_text().splitlines()
+    if line.strip()
+}
+expected = {
+    "owner": "sigproc-demod-v1",
+    "mode": "nbfm",
+    "sample_rate_hz": 50_000,
+    "channels": 1,
+    "encoding": "PCM16LE",
+    "stream_id": 915_200,
+    "rf_freq_hz": 915_200_000.0,
+    "samples": 100_000,
+    "end_reason": "shutdown",
+}
 candidates = []
 for path in root.glob("sigproc-demod-*.json"):
+    if path.name in baseline:
+        continue
     metadata = json.loads(path.read_text())
-    if metadata.get("mode") == "nbfm" and metadata.get("end_reason") == "shutdown":
-        if metadata.get("samples", 0) >= 100_000:
+    if all(metadata.get(key) == value for key, value in expected.items()):
+        if metadata.get("boundary") is None:
             candidates.append((path.stat().st_mtime_ns, path, metadata))
 if not candidates:
-    raise SystemExit("no completed NBFM gate WAV with at least 100000 samples")
+    raise SystemExit("no new completed NBFM gate WAV with exactly 100000 samples")
 _, sidecar, metadata = max(candidates)
 wav_path = root / metadata["wav_file"]
 with wave.open(str(wav_path), "rb") as wav:
     assert wav.getnchannels() == 1
     assert wav.getsampwidth() == 2
     assert wav.getframerate() == 50_000
+    assert wav.getnframes() == metadata["samples"]
     rate = wav.getframerate()
     raw = wav.readframes(wav.getnframes())
 audio = [
