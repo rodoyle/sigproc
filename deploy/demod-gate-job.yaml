@@ -7,13 +7,17 @@ metadata:
   name: sigproc-demod-gate
   namespace: default
   labels:
-    app: sigproc-demod
+    app: sigproc-demod-gate
     type: gate
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
   template:
     spec:
+    metadata:
+      labels:
+        app: sigproc-demod-gate
+        type: gate
       restartPolicy: Never
       nodeSelector:
         kubernetes.io/arch: arm64
