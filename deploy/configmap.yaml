@@ -38,13 +38,13 @@ data:
     interface = "192.168.0.55" # rpi-four-2 LAN address
     ttl = 1
 
-    # The host-network collector accepts control only on the node's loopback.
-    # The source-IP/port allowlist is not authentication; keep it off the LAN.
+    # Operator-approved trusted-LAN control from the native Windows SDR host.
+    # Exact peer only; no authentication or replay protection is provided.
     [control]
     enabled = true
-    ctrl_addr = "127.0.0.1"
+    ctrl_addr = "192.168.0.55"
     ctrl_port = 4991
-    authorized_controller = "127.0.0.1:50000"
+    authorized_controller = "192.168.0.15:50000"
     stream_id = 1
 
     [input]

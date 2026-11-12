@@ -4,7 +4,10 @@ Current rate-control/telemetry operation is documented in
 [capture-rate-observability.md](capture-rate-observability.md), with
 [live rate and ingestion proof](capture-rate-live-proof.md). Historical lab
 settings below describe the original host-multicast rollout; the current
-ConfigMap opts in to loopback-only VRT control.
+ConfigMap now selects operator-approved trusted-LAN VRT control for the exact
+Windows peer `192.168.0.15:50000` on node `192.168.0.55:4991`. This is desired
+configuration, not a loaded-runtime receipt. The earlier loopback profile remains
+an alternative; see [capture-rate-observability.md](capture-rate-observability.md).
 
 The Rust/UHD capture service is the sole B210 owner. Downstream subscribers
 never open UHD. This is a bounded VRT profile, not every VITA 49.2 feature.
@@ -117,10 +120,11 @@ replay protection**. Remote exposure requires trusted-network/firewall controls.
 Data destination is separately configured under `[forwarding]`; multicast joins
 are data subscriptions and do not authorize hardware control. The controller
 must bind its configured source port. SoapyVITA49 uses an ephemeral local UDP
-port and defaults control to its discovered data address/port; neither matches
-this collector's loopback-only control endpoint. Desktop control integration
-therefore remains unproven until an explicit compatible route is configured.
-Do not send a probe to the multicast data endpoint expecting hardware control.
+port and defaults control to its discovered data address/port. A native Windows
+relay must bind `192.168.0.15:50000` for LAN control and return ACKs to the plugin's
+ephemeral loopback socket. Use explicit plugin `ctrl_addr`/`ctrl_port` and `sid=1`;
+multicast data routing does not select the separate control endpoint. Desktop
+control integration remains unproven until actually exercised.
 
 The sole capture thread polls bounded UDP batches between UHD reads. It prepares
 commands while the streamer is alive and directly answers queries/rejections or

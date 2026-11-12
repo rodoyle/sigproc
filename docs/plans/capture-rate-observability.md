@@ -8,19 +8,24 @@ Ethernet and context overhead. Multicast may also be replicated by switches or
 access points. Local socket success does not establish delivery to receivers.
 Choose a low starting rate appropriate for the network and increase gradually.
 
-The running collector exposes immediate VITA 49.2 rate changes on the sole UHD
-owner. The deployment opts in to loopback-only control; defaults in the parser
-remain disabled. The allowlist is not authentication or replay protection: any
-process able to bind `127.0.0.1:50000` in the node network namespace can control
-the radio. Do not expose it to the LAN. Restrict who can exec into host-network
-pods or run processes on the node. A rate change stops and restarts the stream,
-which creates a discontinuity; both destinations get new readback context before
-new IQ. Hardware may round the requested rate. A failed/missing ACK is ambiguous:
-check the current metric/context before retrying. The setting is volatile and
-returns to `[rf].sample_rate` at restart; change the ConfigMap for a persistent
-rate and restart the collector.
+The collector exposes immediate VITA 49.2 changes on the sole UHD owner. The
+original rollout deliberately used loopback control. For the operator-approved
+trusted-LAN tuning demonstration, `deploy/configmap.yaml` now specifies
+`192.168.0.55:4991` with the exact Windows source `192.168.0.15:50000`.
+This is desired configuration, not proof that the running collector has loaded it.
+Parser defaults remain disabled/loopback. The entire local subnet is not added to
+an allowlist; only the one Windows source tuple is permitted.
 
-From a trusted operator with Kubernetes exec access:
+This allowlist is not authentication or replay protection. Use this route only on
+the authorized trusted `192.168.0.0/24` LAN; do not expose it to other networks.
+Read-only queries do not restart capture. Executed changes stop/restart streaming,
+creating a discontinuity; both destinations get new readback context before new
+IQ. Hardware may round a request. A failed/missing ACK is ambiguous: check current
+context before retrying, and never automatically resend an uncertain execute.
+Settings are volatile and return to `[rf]` values at restart; change the ConfigMap
+for persistent settings.
+
+Historical loopback-rollout commands (not valid after selecting the LAN peer):
 
 ```sh
 kubectl -n default exec deploy/sigproc -- python3 /usr/local/bin/vrt-set-rate 250000
