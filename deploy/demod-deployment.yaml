@@ -38,7 +38,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: demod
-          image: ghcr.io/rodoyle/sigproc-demod:latest
+          image: ghcr.io/rodoyle/sigproc-demod@sha256:898ef6c93b6bca53054f6486091256a1a9b39bbf11f86e9a7fdb2846e10f5e2f
           imagePullPolicy: Always
           envFrom:
             - configMapRef:

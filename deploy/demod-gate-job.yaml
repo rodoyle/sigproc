@@ -30,7 +30,7 @@ spec:
         fsGroup: 10001
       initContainers:
         - name: fixture
-          image: ghcr.io/rodoyle/sigproc-fixture:latest
+          image: ghcr.io/rodoyle/sigproc-fixture@sha256:a2e5a933fde608b39c21e6a21992d271ddfa32c12aacee5b5814478e1e53f626
           imagePullPolicy: Always
           args:
             - --nbfm
@@ -50,7 +50,7 @@ spec:
               mountPath: /fixtures
       containers:
         - name: channelizer-replay
-          image: ghcr.io/rodoyle/sigproc-channelizer:latest
+          image: ghcr.io/rodoyle/sigproc-channelizer@sha256:19992751b3863564fe59da5fcde5fb52e05b22cd94ad907a06c92c6ec54d45b8
           imagePullPolicy: Always
           args:
             - --config=/etc/sigproc/config.toml
