@@ -79,8 +79,17 @@ expected = {
     "encoding": "PCM16LE",
     "stream_id": 915_200,
     "rf_freq_hz": 915_200_000.0,
+    "first_input_sample": 0,
+    "first_output_sample": 0,
     "samples": 100_000,
     "end_reason": "shutdown",
+}
+initial_boundary = {
+    "kind": "context_change",
+    "input_sample": None,
+    "missing_samples": None,
+    "output_sample": 0,
+    "recording_sample": 0,
 }
 candidates = []
 for path in root.glob("sigproc-demod-*.json"):
@@ -88,7 +97,7 @@ for path in root.glob("sigproc-demod-*.json"):
         continue
     metadata = json.loads(path.read_text())
     if all(metadata.get(key) == value for key, value in expected.items()):
-        if metadata.get("boundary") is None:
+        if metadata.get("boundary") in (None, initial_boundary):
             candidates.append((path.stat().st_mtime_ns, path, metadata))
 if not candidates:
     raise SystemExit("no new completed NBFM gate WAV with exactly 100000 samples")

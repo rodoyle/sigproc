@@ -146,6 +146,15 @@ fn default_service_records_nbfm_wav_and_sidecar_with_expected_tone() {
     assert_eq!(metadata["samples"], input.len() as u64);
     assert_eq!(metadata["end_reason"], "test");
     let wav = std::fs::read(directory.join(metadata["wav_file"].as_str().unwrap())).unwrap();
+    assert_eq!(metadata["first_input_sample"], 0);
+    assert_eq!(metadata["first_output_sample"], 0);
+    assert_eq!(metadata["boundary"], serde_json::json!({
+        "kind": "context_change",
+        "input_sample": null,
+        "missing_samples": null,
+        "output_sample": 0,
+        "recording_sample": 0,
+    }));
     let audio: Vec<Iq> = wav[44..]
         .chunks_exact(2)
         .skip(5_000)
