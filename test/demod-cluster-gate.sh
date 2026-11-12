@@ -29,6 +29,9 @@ kubectl -n "$NS" rollout status deploy/sigproc-demod --timeout=180s >/dev/null
 # Isolate the deterministic stream from live RF; the B210 capture stays running.
 kubectl -n "$NS" scale deploy sigproc-channelizer --replicas=0 >/dev/null
 kubectl -n "$NS" wait --for=delete pod -l app=sigproc-channelizer --timeout=120s >/dev/null
+# Reset demod counters after any live packets and before the deterministic run.
+kubectl -n "$NS" delete pod -l app=sigproc-demod --wait --timeout=120s >/dev/null
+kubectl -n "$NS" rollout status deploy/sigproc-demod --timeout=180s >/dev/null
 kubectl -n "$NS" delete job "$JOB" --ignore-not-found >/dev/null
 kubectl -n "$NS" apply -f deploy/demod-gate-job.yaml >/dev/null
 kubectl -n "$NS" wait --for=condition=complete "job/$JOB" --timeout=300s >/dev/null
