@@ -344,6 +344,103 @@ fn query_command(stream_id: u32, cif0: u32, message_id: u32) -> Vec<u8> {
 }
 
 #[test]
+fn python_bridge_remote_interoperates_with_actual_rust_controllee() {
+    use std::io::{Read, Write};
+
+    let reserved = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let peer = reserved.local_addr().unwrap();
+    drop(reserved);
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let endpoint = ControlSocket { socket, peer };
+    let control_port = endpoint.socket.local_addr().unwrap().port();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test/vrt_control_bridge.py");
+    let python = std::env::var_os("SIGPROC_TEST_PYTHON").unwrap_or_else(|| {
+        if cfg!(windows) { "python" } else { "python3" }.into()
+    });
+    let mut child = std::process::Command::new(python)
+        .arg(script)
+        .args([
+            "remote",
+            "--source-port",
+            &peer.port().to_string(),
+            "--collector-port",
+            &control_port.to_string(),
+            "--stream-id",
+            "17",
+            "--timeout",
+            "2",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let result = (|| -> std::io::Result<Vec<u8>> {
+                let mut size = [0; 4];
+                stdout.read_exact(&mut size)?;
+                let len = u32::from_be_bytes(size) as usize;
+                if len == 0 || len > 4096 {
+                    return Err(std::io::Error::other("invalid bridge frame size"));
+                }
+                let mut packet = vec![0; len];
+                stdout.read_exact(&mut packet)?;
+                Ok(packet)
+            })();
+            if tx.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    let send = |stdin: &mut std::process::ChildStdin, packet: &[u8]| {
+        stdin.write_all(&(packet.len() as u32).to_be_bytes()).unwrap();
+        stdin.write_all(packet).unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut ctl = Controllee::new(initial(), 17);
+    let cif0 = (1 << 29) | (1 << 27) | (1 << 23) | (1 << 21);
+    send(&mut stdin, &query_command(17, cif0, 42));
+    let datagram = poll(&endpoint);
+    assert_ne!(word(&datagram, 12), 42, "bridge must substitute its wire message ID");
+    assert!(endpoint
+        .prepare_streaming(&datagram, &mut ctl, || panic!("query stopped RX"))
+        .unwrap()
+        .is_none());
+    let reply = rx.recv_timeout(Duration::from_secs(4)).unwrap().unwrap();
+    assert_eq!(word(&reply, 24), 42, "bridge restores the client message ID");
+    assert_ne!(word(&reply, 20) & (1 << 18), 0);
+    assert_eq!(word(&reply, 20) & ((1 << 19) | (1 << 10) | (1 << 16)), 0);
+    assert_eq!(hz(&reply, 44), initial().rf_freq_hz);
+    assert_eq!(ctl.applied, initial());
+
+    // The helper's default policy rejects a GUI startup retune before Rust sees it.
+    send(&mut stdin, &vita49::hand_command(17, 1 << 27, &q20(100e6)));
+    let denied = rx.recv_timeout(Duration::from_secs(4)).unwrap().unwrap();
+    assert_eq!(word(&denied, 24), 1);
+    assert_ne!(word(&denied, 20) & (1 << 16), 0);
+    assert_eq!(word(&denied, 20) & (1 << 10), 0);
+    assert_eq!(word(&denied, 28), 0, "denial contains no fabricated readback");
+    assert!(endpoint.poll().unwrap().is_none(), "execute reached the collector");
+    assert_eq!(ctl.applied, initial());
+    drop(stdin);
+    reader.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("bridge remote helper did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(child.wait().unwrap().success());
+}
+#[test]
 fn query_state_answers_from_confirmed_state_without_touching_hardware() {
     let (endpoint, peer, mut ctl, backend) = harness();
     let cif0 = (1 << 29) | (1 << 27) | (1 << 23) | (1 << 21);
