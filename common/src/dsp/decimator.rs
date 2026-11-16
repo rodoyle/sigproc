@@ -247,7 +247,7 @@ impl Channelizer {
     /// Run interleaved sc16 wideband samples through the chain, appending the
     /// surviving narrowband samples to `out`.
     pub fn process(&mut self, interleaved_sc16: &[i16], out: &mut Vec<Iq>) {
-        for pair in interleaved_sc16.chunks_exact(2) {
+        for pair in interleaved_sc16.as_chunks::<2>().0 {
             let sample = Iq::new(
                 pair[0] as f32 / SC16_FULL_SCALE,
                 pair[1] as f32 / SC16_FULL_SCALE,

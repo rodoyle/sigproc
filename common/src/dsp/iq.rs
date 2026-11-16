@@ -43,7 +43,7 @@ pub const SC16_FULL_SCALE: f32 = 32768.0;
 /// pairs, and a half sample is not a sample.
 pub fn sc16_to_iq(interleaved: &[i16]) -> Vec<Iq> {
     interleaved
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|p| Iq::new(p[0] as f32 / SC16_FULL_SCALE, p[1] as f32 / SC16_FULL_SCALE))
         .collect()
 }
