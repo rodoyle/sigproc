@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # releases/v4
 
       - name: Compute short SHA
         id: sha
@@ -52,7 +52,7 @@ jobs:
           echo "full=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@c0c8b32d33a5244f1e5947304550403b63930415 # v4
         with:
           version: v1.36.4
 
@@ -166,8 +166,6 @@ jobs:
           echo "demod=$(resolve ghcr.io/rodoyle/sigproc-demod:latest)" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Publish build summary
-        run: |
       - name: Publish build summary
         run: |
           SHA_SHORT="${{ steps.sha.outputs.short }}"
