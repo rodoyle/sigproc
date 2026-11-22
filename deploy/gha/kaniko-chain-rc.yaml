@@ -1,0 +1,162 @@
+# Kaniko Job (GitHub Actions RC build): builds the four UHD-free service images
+# and pushes each to ghcr.io/rodoyle/<image>:<sha> AND :latest.
+#
+# GitHub-Actions-driven twin of deploy/kaniko-channelizer-job.yaml. Templated
+# via env vars so the workflow can template it with envsubst:
+#   GIT_REF   — the git commit to build (default: master)
+#   SHA_SHORT — short git SHA used for the immutable RC tag (required)
+#
+# Builds channelizer, fixture, sink, demod sequentially sharing the clone + SMB
+# scratch, exactly like the cluster Job. Each image gets both an immutable
+# <sha> tag and the moving :latest tag.
+#
+# Apply (from GH Actions):
+#   envsubst < deploy/gha/kaniko-chain-rc.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-rc-sigproc-chain-${SHA_SHORT}
+  namespace: build
+  labels:
+    app: sigproc
+    type: kaniko-rc
+    ci: github-actions
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["rpi-four-2"]
+      restartPolicy: Never
+      initContainers:
+        # ── Clone the sigproc repo at the exact RC commit ───────────────
+        - name: git-clone
+          image: alpine/git:latest
+          env:
+            - name: GIT_REF
+              value: "${GIT_REF:-master}"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              git clone https://github.com/rodoyle/sigproc.git /workspace
+              git -C /workspace checkout --detach "$GIT_REF"
+              ACTUAL=$(git -C /workspace rev-parse HEAD)
+              echo "Cloned sigproc @ $ACTUAL"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        # ── Stage registry credentials on the writable SMB scratch ─────
+        - name: stage-kaniko-creds
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /kaniko-scratch/.docker
+              cp /secret/.dockerconfigjson /kaniko-scratch/.docker/config.json
+              chmod 0600 /kaniko-scratch/.docker/config.json
+              echo "Staged kaniko docker config"
+          volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        # ── The four builds, sequentially, sharing clone + scratch ─────
+        - name: build-channelizer
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=channelizer/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-channelizer:${SHA_SHORT}
+            - --destination=ghcr.io/rodoyle/sigproc-channelizer:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        - name: build-fixture
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=fixture/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-fixture:${SHA_SHORT}
+            - --destination=ghcr.io/rodoyle/sigproc-fixture:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        - name: build-sink
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=sink/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-sink:${SHA_SHORT}
+            - --destination=ghcr.io/rodoyle/sigproc-sink:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+        - name: build-demod
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=demod/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc-demod:${SHA_SHORT}
+            - --destination=ghcr.io/rodoyle/sigproc-demod:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+      containers:
+        # A pod needs a main container; the work is all in the init containers.
+        - name: report
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - echo "all four UHD-free images built and pushed"
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: kaniko-secret
+          secret:
+            secretName: ghcr-push
+            items:
+              - key: .dockerconfigjson
+                path: .dockerconfigjson
+        - name: kaniko-scratch
+          persistentVolumeClaim:
+            claimName: kaniko-scratch

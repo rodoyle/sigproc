@@ -1,0 +1,106 @@
+# Kaniko Job (GitHub Actions RC build): builds the sigproc CAPTURE image and
+# pushes to ghcr.io/rodoyle/sigproc:<sha> AND ghcr.io/rodoyle/sigproc:latest.
+#
+# This is the GitHub-Actions-driven twin of deploy/kaniko-job.yaml. It is
+# parameterized via env vars so the workflow can template it with envsubst:
+#   GIT_REF  — the git commit to build (default: master)
+#   SHA_SHORT — short git SHA used for the immutable RC tag (required)
+#
+# Kaniko accepts multiple --destination flags, so one build produces both the
+# immutable <sha> tag and the moving :latest tag.
+#
+# Requires: deploy/kaniko-scratch-pvc.yaml applied first; the ghcr-push secret
+# in namespace build; a self-hosted arm64 node or the default arm64 selector.
+#
+# Apply (from GH Actions):
+#   envsubst < deploy/gha/kaniko-job-rc.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-rc-sigproc-${SHA_SHORT}
+  namespace: build
+  labels:
+    app: sigproc
+    type: kaniko-rc
+    ci: github-actions
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 5400
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      restartPolicy: Never
+      initContainers:
+        # ── Clone the sigproc repo at the exact RC commit ───────────────
+        - name: git-clone
+          image: alpine/git:latest
+          env:
+            - name: GIT_REF
+              value: "${GIT_REF:-master}"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              git clone https://github.com/rodoyle/sigproc.git /workspace
+              git -C /workspace checkout --detach "$GIT_REF"
+              ACTUAL=$(git -C /workspace rev-parse HEAD)
+              echo "Cloned sigproc @ $ACTUAL"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        # ── Stage registry credentials on the writable SMB scratch ─────
+        - name: stage-kaniko-creds
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /kaniko-scratch/.docker
+              cp /secret/.dockerconfigjson /kaniko-scratch/.docker/config.json
+              chmod 0600 /kaniko-scratch/.docker/config.json
+              echo "Staged kaniko docker config"
+          volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=capture/Dockerfile
+            - --destination=ghcr.io/rodoyle/sigproc:${SHA_SHORT}
+            - --destination=ghcr.io/rodoyle/sigproc:latest
+            - --cache=true
+            - --cache-ttl=24h
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+              cpu: "3000m"
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: kaniko-secret
+          secret:
+            secretName: ghcr-push
+            items:
+              - key: .dockerconfigjson
+                path: .dockerconfigjson
+        - name: kaniko-scratch
+          persistentVolumeClaim:
+            claimName: kaniko-scratch

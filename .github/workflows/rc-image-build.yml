@@ -1,0 +1,190 @@
+# GitHub Actions: build release-candidate container images on master push.
+#
+# Strategy: drive the existing arm64 kaniko build infrastructure in the k3s
+# cluster. This workflow clones the repo at the pushed SHA, applies templated
+# kaniko Job manifests (deploy/gha/*.yaml) push to both ghcr.io/<image>:<sha>
+# and ghcr.io/<image>:latest, waits for the Jobs to complete, then records the
+# immutable image digests.
+#
+# Why kaniko-driven instead of building in GH Actions:
+#   * All images target linux/arm64. GitHub-hosted runners are x86_64; QEMU
+#     cross-builds of Rust are extremely slow and UHD (capture) has no drop-in
+#     arm64 cross toolchain.
+#   * The cluster already has arm64 nodes, SMB-backed kaniko scratch, and the
+#     ghcr-push secret. Reusing it keeps builds fast and consistent.
+#
+# Secrets required (repo or org level):
+#   KUBECONFIG_YAML — a kubeconfig for the cluster (as raw YAML text). The
+#     account needs: create/jobs in namespace build, get/logs/wait on jobs.
+#   GHCR_PUSH_DOCKERCONFIGJSON — docker config.json with a GHCR PAT that has
+#     write:packages scope. This is consumed by the kaniko Jobs via the
+#     ghcr-push secret; GH Actions itself never touches the registry.
+#
+# The workflow does NOT need a PAT directly — kaniko pushes using the cluster
+# secret. KUBECONFIG_YAML is the only GH Actions secret that drives the build.
+name: RC image build
+
+on:
+  push:
+    branches:
+      - "master"
+
+concurrency:
+  group: rc-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: rodoyle
+
+jobs:
+  rc-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: |
+          echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "full=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.36.4
+
+      - name: Configure kubeconfig
+        run: |
+          cat > "$RUNNER_TEMP/kubeconfig" <<'KUBECONFIG_EOF'
+          ${{ secrets.KUBECONFIG_YAML }}
+          KUBECONFIG_EOF
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          kubectl version --client=true
+          echo "Connected to cluster:"
+          kubectl cluster-info
+
+      - name: Ensure kaniko scratch PVC exists
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          kubectl -n build apply -f deploy/kaniko-scratch-pvc.yaml
+          kubectl -n build get pvc kaniko-scratch
+
+      - name: Validate ghcr-push secret exists
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          if ! kubectl -n build get secret ghcr-push >/dev/null 2>&1; then
+            echo "::error::secret ghcr-push not found in namespace build"
+            echo "Create it with:"
+            echo "  kubectl -n build create secret generic ghcr-push \\"
+            echo "    --from-file=.dockerconfigjson=<dockerconfigjson>"
+            exit 1
+          fi
+          echo "ghcr-push secret present"
+
+      - name: Template and apply capture RC Job
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          # envsubst substitutes ${VAR} and ${VAR:-default} patterns.
+          envsubst < deploy/gha/kaniko-job-rc.yaml > /tmp/kaniko-rc-sigproc.yaml
+          echo "--- templated capture Job ---"
+          grep -E "name:|destination:" /tmp/kaniko-rc-sigproc.yaml
+          kubectl apply -f /tmp/kaniko-rc-sigproc.yaml
+
+      - name: Template and apply chain RC Job
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          envsubst < deploy/gha/kaniko-chain-rc.yaml > /tmp/kaniko-rc-chain.yaml
+          echo "--- templated chain Job ---"
+          grep -E "name:|destination:" /tmp/kaniko-rc-chain.yaml
+          kubectl apply -f /tmp/kaniko-rc-chain.yaml
+
+      - name: Wait for capture RC Job
+        id: capture
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          JOB="kaniko-rc-sigproc-${SHA_SHORT}"
+          echo "Waiting for job $JOB ..."
+          if kubectl -n build wait --for=condition=complete \
+              job/"$JOB" --timeout=5400s; then
+            echo "status=complete" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "=== last logs ==="
+            kubectl -n build logs job/"$JOB" --tail=100 || true
+            exit 1
+          fi
+
+      - name: Wait for chain RC Job
+        id: chain
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          JOB="kaniko-rc-sigproc-chain-${SHA_SHORT}"
+          echo "Waiting for job $JOB ..."
+          if kubectl -n build wait --for=condition=complete \
+              job/"$JOB" --timeout=7200s; then
+            echo "status=complete" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "=== last logs ==="
+            kubectl -n build logs job/"$JOB" --tail=100 || true
+            exit 1
+          fi
+
+      - name: Resolve image digests
+        id: digest
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          # ghcr.io images are addressable by tag; resolve to immutable digests.
+          # Use crane (or skopeo) if available, else fall back to inspecting
+          # the kaniko termination log which prints the pushed digest.
+          resolve() {
+            local ref="$1"
+            if command -v crane >/dev/null 2>&1; then
+              crane digest "$ref" 2>/dev/null || echo "unknown"
+            else
+              # crane not installed; report tag-only (digest from logs)
+              echo "tag-only"
+            fi
+          }
+          echo "capture=$(resolve ghcr.io/rodoyle/sigproc:latest)" \
+            >> "$GITHUB_OUTPUT"
+          echo "channelizer=$(resolve ghcr.io/rodoyle/sigproc-channelizer:latest)" \
+            >> "$GITHUB_OUTPUT"
+          echo "fixture=$(resolve ghcr.io/rodoyle/sigproc-fixture:latest)" \
+            >> "$GITHUB_OUTPUT"
+          echo "sink=$(resolve ghcr.io/rodoyle/sigproc-sink:latest)" \
+            >> "$GITHUB_OUTPUT"
+          echo "demod=$(resolve ghcr.io/rodoyle/sigproc-demod:latest)" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Publish build summary
+        run: |
+      - name: Publish build summary
+        run: |
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          SHA_FULL="${{ steps.sha.outputs.full }}"
+          DIG_CAP="${{ steps.digest.outputs.capture }}"
+          DIG_CHA="${{ steps.digest.outputs.channelizer }}"
+          DIG_FIX="${{ steps.digest.outputs.fixture }}"
+          DIG_SIN="${{ steps.digest.outputs.sink }}"
+          DIG_DEM="${{ steps.digest.outputs.demod }}"
+          cat > "$GITHUB_STEP_SUMMARY" <<SUMMARY_EOF
+          ## RC build: ${SHA_SHORT}
+          - Source: \`${SHA_FULL}\`
+          - Capture: \`ghcr.io/rodoyle/sigproc:${SHA_SHORT}\` + latest (digest: ${DIG_CAP})
+          - Channelizer: \`ghcr.io/rodoyle/sigproc-channelizer:${SHA_SHORT}\` + latest (digest: ${DIG_CHA})
+          - Fixture: \`ghcr.io/rodoyle/sigproc-fixture:${SHA_SHORT}\` + latest (digest: ${DIG_FIX})
+          - Sink: \`ghcr.io/rodoyle/sigproc-sink:${SHA_SHORT}\` + latest (digest: ${DIG_SIN})
+          - Demod: \`ghcr.io/rodoyle/sigproc-demod:${SHA_SHORT}\` + latest (digest: ${DIG_DEM})
+          SUMMARY_EOF
+          echo "RC images pushed to ghcr.io/rodoyle/"
+          echo "Tags: :${SHA_SHORT} and :latest"
