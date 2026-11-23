@@ -4,3 +4,4 @@
 usrp_b210_fpga.bin
 *.pyc
 .ruff_cache/
+__pycache__

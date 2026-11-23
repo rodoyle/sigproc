@@ -1,7 +1,8 @@
 {
-	"indexMode": "auto",
+	"indexMode": "manual",
 	"disabled": false,
 	"coach": true,
 	"verify": true,
-	"gitignore": true
+	"gitignore": true,
+	"lastIndexed": "2026-11-12T14:25:24.129Z"
 }

@@ -123,13 +123,13 @@ document.
 
 ## Sequencing
 
-1. HTTP C2 on Capture, sharing the existing owner-thread handler (highest value:
-   it is the failsafe path for a flaky VITA 49.2 control channel).
-2. HTTP C2 on Channelizer, including restart-free channel retune.
-3. NBFM demod plus the 12.5 kHz channel it needs.
-4. Waterfall/Orbweaver multicast conversion.
-5. Networking migration: Cilium, UDP gateway, host-network retirement.
-
+1. Finish the pinned capture build, deploy the exact direct-LAN peer config with `Recreate`, perform a read-only Windows state query, then demonstrate one 145.310 MHz RF-only tune with restoration. VITA 49.2 is the immediate control path.
+2. Add the Capture HTTP C2 fallback afterward, sharing the same sole-owner handler and hardware readback.
+3. Convert Waterfall/Orbweaver to multicast before the band sweep; retain unicast until byte-identical data/context reception is proven.
+4. Fix a wideband RF capture spanning 140–150 MHz, then use restart-free digital channelizer moves through 12.5 kHz-class NBFM slices. Do not stop/restart the B210 for every sweep step.
+5. Implement Channelizer HTTP C2 for state and runtime channel movement; run the full native-Windows 140–150 MHz sweep, record each applied readback/observation and restore the original state.
+6. Implement/deploy NBFM Demod for the 12.5 kHz-class channel and its HTTP C2 lifecycle operations.
+7. Later, plan and migrate from hostNetwork to normal Kubernetes networking with Cilium and a UDP gateway; preserve a rollback to the proven LAN path.
 ## Non-goals for now
 
 - No second UHD owner, no rolling update that could surge two collectors.
