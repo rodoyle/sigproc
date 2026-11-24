@@ -32,7 +32,7 @@ spec:
         - name: ghcr-pull
       containers:
         - name: probe
-          image: ghcr.io/rodoyle/sigproc:latest
+          image: ghcr.io/rodoyle/sigproc-capture:latest
           imagePullPolicy: Always
           securityContext:
             privileged: true

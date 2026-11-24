@@ -1,9 +1,9 @@
 # Deployment: channelizer service.
 #
-#   sigproc (B210) --VITA49/UDP--> sigproc-channelizer
+#   sigproc-capture (B210) --VITA49/UDP--> sigproc-channelizer
 #      --VITA49/UDP--> NBFM demod
 #
-# This pod needs NO hardware: it reads a UDP stream and writes another. That is
+# This pod needs NO RF hardware: it reads a UDP stream and writes another. That is
 # what makes it schedulable anywhere, unlike the capture service, which is
 # pinned to the node with the B210 on its USB bus.
 #
