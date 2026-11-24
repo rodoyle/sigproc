@@ -1,5 +1,5 @@
 # Fast test of the rust workspace
-name: Rust
+name: Rust Checker
 on:
   push:
     branches: [ "*" ]
