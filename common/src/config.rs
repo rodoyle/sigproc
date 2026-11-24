@@ -322,7 +322,10 @@ mod tests {
         let text = format!("{CAPTURE_TOML}\n[forwarding.multicast]\ngroup='239.255.49.2'\nport=4820\ninterface='192.0.2.55'\n");
         let cfg: Config = toml::from_str(&text).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.forwarding.vita49_dest_host, "waterfall-service.default.svc.cluster.local");
+        assert_eq!(
+            cfg.forwarding.vita49_dest_host,
+            "waterfall-service.default.svc.cluster.local"
+        );
         let multicast = cfg.forwarding.multicast.unwrap();
         assert_eq!(multicast.group.to_string(), "239.255.49.2");
         assert_eq!(multicast.ttl, 1);

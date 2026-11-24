@@ -2,7 +2,7 @@
 #
 # Layout: one child directory per service, each with its own binary target and
 # its own Dockerfile. The shared `common/` crate owns everything that must not
-# diverge between services — above all the VITA 49.0 wire format, which is the
+# diverge between services — above all the VITA 49.2 wire format, which is the
 # contract between capture, channelizer and any downstream consumer.
 #
 #   common/       lib  sigproc-common      (wire format, config, DSP)

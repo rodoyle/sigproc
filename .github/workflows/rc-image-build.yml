@@ -7,11 +7,6 @@
 # immutable image digests.
 #
 # Why kaniko-driven instead of building in GH Actions:
-#   * All images target linux/arm64. GitHub-hosted runners are x86_64; QEMU
-#     cross-builds of Rust are extremely slow and UHD (capture) has no drop-in
-#     arm64 cross toolchain.
-#   * The cluster already has arm64 nodes, SMB-backed kaniko scratch, and the
-#     ghcr-push secret. Reusing it keeps builds fast and consistent.
 #
 # Secrets required (repo or org level):
 #   KUBECONFIG_YAML — a kubeconfig for the cluster (as raw YAML text). The
@@ -155,7 +150,7 @@ jobs:
               echo "tag-only"
             fi
           }
-          echo "capture=$(resolve ghcr.io/rodoyle/sigproc:latest)" \
+          echo "capture=$(resolve ghcr.io/rodoyle/sigproc-capture:latest)" \
             >> "$GITHUB_OUTPUT"
           echo "channelizer=$(resolve ghcr.io/rodoyle/sigproc-channelizer:latest)" \
             >> "$GITHUB_OUTPUT"
@@ -178,7 +173,7 @@ jobs:
           cat > "$GITHUB_STEP_SUMMARY" <<SUMMARY_EOF
           ## RC build: ${SHA_SHORT}
           - Source: \`${SHA_FULL}\`
-          - Capture: \`ghcr.io/rodoyle/sigproc:${SHA_SHORT}\` + latest (digest: ${DIG_CAP})
+          - Capture: \`ghcr.io/rodoyle/sigproc-capture:${SHA_SHORT}\` + latest (digest: ${DIG_CAP})
           - Channelizer: \`ghcr.io/rodoyle/sigproc-channelizer:${SHA_SHORT}\` + latest (digest: ${DIG_CHA})
           - Fixture: \`ghcr.io/rodoyle/sigproc-fixture:${SHA_SHORT}\` + latest (digest: ${DIG_FIX})
           - Sink: \`ghcr.io/rodoyle/sigproc-sink:${SHA_SHORT}\` + latest (digest: ${DIG_SIN})

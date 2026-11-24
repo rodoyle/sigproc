@@ -2,14 +2,16 @@ name: SigProc Capture Image CI
 on:
   push:
     branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+
 permissions:
   contents: read
 
 env:
   DOCKER_BUILDKIT: "1"
+  REGISTRY: ghcr.io
+  OWNER: rodoyle
   IMAGE: ghcr.io/rodoyle/sigproc-capture
+
 jobs:
   test-build-image:
     runs-on: ubuntu-24.04-arm
@@ -17,25 +19,34 @@ jobs:
       contents: read
       packages: write
     steps:
-    - name: Check out source
-      uses: actions/checkout@v4
-    - name: Test release build and assemble image
-      run: |
-        docker build \
-          --progress=plain \
-          --file capture/Dockerfile \
-          --tag sigproc:${{ github.sha }} \
-          . 
-    - name: Log in to GHCR
-      if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    - name: Push Image
-      if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-      run: |
-        docker push "$IMAGE:${{ github.sha }}"
-        docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
-        docker push "$IMAGE:latest"
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: |
+          echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "full=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Test release build and assemble image
+        run: |
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          docker build \
+            --progress=plain \
+            --file capture/Dockerfile \
+            --tag sigproc-capture:$SHA_SHORT \
+            .
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push Image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          docker push "$IMAGE:$SHA_SHORT"
+          docker tag "$IMAGE:$SHA_SHORT" "$IMAGE:latest"
+          docker push "$IMAGE:latest"

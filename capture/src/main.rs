@@ -2,7 +2,7 @@
 //!
 //! Discovers a USRP B210 via UHD, configures RF parameters from a
 //! config.toml, acquires sc16 IQ samples, and forwards them as
-//! VITA 49.0 IF Data Packets over UDP to a downstream waterfall consumer.
+//! VITA 49.2 IF Data Packets over UDP to a downstream waterfall consumer.
 //!
 //! VITA49 framing and config parsing now live in `sigproc-common`, because the
 //! channelizer and any other consumer share that wire format. This binary owns
@@ -163,17 +163,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 if let Some(endpoint) = &control_socket {
                     if let Some(datagram) = endpoint.poll()? {
                         metrics.control();
-                        if let Some(pending) = endpoint.prepare_streaming(
-                            &datagram,
-                            &mut controllee,
-                            || {
+                        if let Some(pending) =
+                            endpoint.prepare_streaming(&datagram, &mut controllee, || {
                                 streamer.send_command(&uhd::StreamCommand {
                                     time: uhd::StreamTime::Now,
                                     command_type: uhd::StreamCommandType::StopContinuous,
                                 })?;
                                 Ok(())
-                            },
-                        )? {
+                            })?
+                        {
                             break pending;
                         }
                     }

@@ -1,0 +1,31 @@
+# Version control
+.git
+.github
+
+# Local Rust build output, including nested targets
+**/target
+
+# Editor / agent state
+.vscode
+.idea
+.pi
+.pi-glla
+.zvec-grep
+.ruff_cache
+**/*.swp
+**/*~
+
+# Local environment / credentials
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__
+*.pyc
+
+# Generated local logs
+**/*.log
+
+# DevOps tooling
+deploy

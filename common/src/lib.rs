@@ -4,7 +4,7 @@
 //! Every module in this workspace depends on this crate for the things that
 //! must not diverge between services:
 //!
-//! * [`vita49`] — the VITA 49.0 IF Data Packet wire format. It is the contract
+//! * [`vita49`] — the VITA 49.2 IF Data Packet wire format. It is the contract
 //!   between `sigproc` (capture), `sigproc-channelizer` and any downstream
 //!   consumer, so it is defined in exactly one place.
 //! * [`config`] — `config.toml` parsing and validation shared by the services.

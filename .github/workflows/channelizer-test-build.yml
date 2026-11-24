@@ -1,0 +1,53 @@
+# Downstream of the RF FrontEnd Capture Service
+# The Channelizer is not obligated to run on any particular host
+name: SigProc Channelizer Image CI
+on:
+  push:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILDKIT: "1"
+  REGISTRY: ghcr.io
+  OWNER: rodoyle
+  IMAGE: ghcr.io/rodoyle/sigproc-channelizer
+
+jobs:
+  test-build-image:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: |
+          echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "full=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Test release build and assemble image
+        run: |
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          docker build \
+            --progress=plain \
+            --file channelizer/Dockerfile \
+            --tag sigproc-channelizer:$SHA_SHORT \
+            .
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push Image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          SHA_SHORT="${{ steps.sha.outputs.short }}"
+          docker push "$IMAGE:$SHA_SHORT"
+          docker tag "$IMAGE:$SHA_SHORT" "$IMAGE:latest"
+          docker push "$IMAGE:latest"

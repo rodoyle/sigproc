@@ -1,4 +1,4 @@
-//! Minimal VITA 49.0 (VRT) IF Data Packet framing and UDP forwarding.
+//! Minimal VITA 49.2 (VRT) IF Data Packet framing and UDP forwarding.
 //!
 //! Encodes IQ samples as sc16 (interleaved 16-bit signed) VITA49 packets
 //! and sends them via UDP to the configured destination.
@@ -7,11 +7,13 @@
 //! process is the RF capture front-end, and it must keep capturing even when
 //! the downstream consumer (waterfall) is not deployed yet. Until the name
 //! resolves, packets are dropped and a periodic warning is logged.
+//!
+//! Reference VITA49.2 specification from https://github.com/Geontech/vrtgen.git
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// VITA 49.0 packet header constants.
+/// VITA 49.2 packet header constants.
 const VITA49_IF_DATA_PACKET: u32 = 0x1;
 /// IF Context Packet (with stream ID).
 const VITA49_IF_CONTEXT_PACKET: u32 = 0x4;
@@ -53,13 +55,13 @@ const HEADER_WORDS: usize = 5;
 /// Bytes occupied by [`HEADER_WORDS`] (5 x 4).
 pub const HEADER_BYTES: usize = HEADER_WORDS * 4;
 
-/// Build one complete VITA 49.0 IF Data Packet with stream ID 0 and packet
+/// Build one complete VITA 49.2 IF Data Packet with stream ID 0 and packet
 /// count 0. Convenience wrapper over [`build_data_packet`] for fixtures/tests.
 pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> Vec<u8> {
     build_data_packet(samples, timestamp_secs, sample_rate, 0, 0)
 }
 
-/// Build one complete VITA 49.0 IF Data Packet from interleaved sc16 IQ samples.
+/// Build one complete VITA 49.2 IF Data Packet from interleaved sc16 IQ samples.
 ///
 /// `samples` is interleaved I/Q as `[I0, Q0, I1, Q1, ...]` i16; a trailing odd
 /// element (an I with no Q) is ignored so the payload is always whole words.
@@ -78,7 +80,7 @@ pub fn build_packet(samples: &[i16], timestamp_secs: f64, sample_rate: f64) -> V
 /// ```
 ///
 /// The size field (header bits 15-0) is the **total** number of 32-bit words in
-/// the packet including the header, per VITA 49.0 (and as SoapyVITA49 and
+/// the packet including the header, per VITA 49.2 (and as SoapyVITA49 and
 /// Geon's libVRT read it). A full 2048-sample packet is 2053 words = 8212 bytes
 /// with header `0x10D00805`.
 ///
@@ -159,7 +161,7 @@ pub struct StreamContext {
     pub gain_db: f64,
 }
 
-/// Context Indicator Field 0 bits (VITA 49.0 §7.1.5.1).
+/// Context Indicator Field 0 bits (VITA 49.2 §7.1.5.1).
 const CIF0_CHANGE_INDICATOR: u32 = 1 << 31;
 const CIF0_BANDWIDTH: u32 = 1 << 29;
 const CIF0_RF_REF_FREQ: u32 = 1 << 27;
@@ -179,7 +181,7 @@ fn hz_q20(hz: f64) -> u64 {
 }
 
 /// Data Packet Payload Format field describing our sc16 I/Q payload
-/// (VITA 49.0 §7.1.5.18): packing method = link-efficient (0), real/complex =
+/// (VITA 49.2 §7.1.5.18): packing method = link-efficient (0), real/complex =
 /// complex cartesian (01), data item format = signed fixed-point (00000),
 /// item packing field size = 16 bits (0b001111), data item size = 16 bits
 /// (0b001111), repeat count and vector size = 1 (encoded 0).
@@ -275,7 +277,7 @@ pub struct Vita49Forwarder {
     /// VRT 4-bit data-packet sequence counter (modulo 16).
     data_seq: u8,
     /// VRT 4-bit context-packet sequence counter (modulo 16); context packets
-    /// form their own sequence in VITA 49.0.
+    /// form their own sequence in VITA 49.2.
     context_seq: u8,
     /// Data packets sent since the last context packet.
     data_since_context: u32,
@@ -639,7 +641,7 @@ impl Vita49Forwarder {
     }
 }
 
-/// A parsed VITA 49.0 IF Data Packet, borrowing its payload from the buffer.
+/// A parsed VITA 49.2 IF Data Packet, borrowing its payload from the buffer.
 ///
 /// The wire format is defined by [`build_packet`] in this module and parsed
 /// here, so a change to one side fails the round-trip test immediately rather
@@ -846,7 +848,9 @@ impl<'a> PacketCursor<'a> {
 /// VITA 49.2 bounded command profile; framing is shared with capture's control socket.
 #[path = "vita49_control.rs"]
 mod control;
-pub use control::{hand_command, ControlBackend, ControlUpdate, Controllee, PendingExecute, PreparedControl};
+pub use control::{
+    hand_command, ControlBackend, ControlUpdate, Controllee, PendingExecute, PreparedControl,
+};
 #[cfg(test)]
 use control::{parse_command, CAM_ACK_APPLIED, CAM_ACK_REJECTED, CIF0_REFERENCE_LEVEL};
 #[cfg(test)]
@@ -1449,7 +1453,10 @@ mod tests {
             panic!("query cannot prepare hardware execution");
         };
         let decoded = parse_command(&ack).unwrap();
-        assert_eq!(decoded.action, 0, "query ACK must not be classified as applied");
+        assert_eq!(
+            decoded.action, 0,
+            "query ACK must not be classified as applied"
+        );
         assert_eq!(&ack[44..52], &hz_q20(start.rf_freq_hz).to_be_bytes());
         let gain = u32::from_be_bytes(ack[52..56].try_into().unwrap());
         assert_eq!(gain as u16 as i16 as f64 / 128.0, start.gain_db);
