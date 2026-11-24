@@ -18,7 +18,7 @@ impl ControlSocket {
             return Ok(None);
         }
         let peer = cfg
-            .authorized_controller
+            .authorized_controller //TODO - entire 192.168.0.0/24 subnet is valid controller
             .ok_or_else(|| anyhow::anyhow!("missing authorized controller"))?;
         let socket = UdpSocket::bind(SocketAddr::new(cfg.ctrl_addr, cfg.ctrl_port))?;
         socket.set_nonblocking(true)?;
