@@ -1,4 +1,4 @@
-name: SigProc Capture Image CI
+name: SigProc Demod Image CI
 on:
   push:
     branches: [ "master" ]
@@ -10,11 +10,11 @@ env:
   DOCKER_BUILDKIT: "1"
   REGISTRY: ghcr.io
   OWNER: rodoyle
-  IMAGE: ghcr.io/rodoyle/sigproc-capture
+  IMAGE: ghcr.io/rodoyle/sigproc-demod
 
 jobs:
   test-build-image:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -34,7 +34,7 @@ jobs:
           docker build \
             --progress=plain \
             --file capture/Dockerfile \
-            --tag sigproc:$SHA_SHORT \
+            --tag $IMAGE:$SHA_SHORT \
             .
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'

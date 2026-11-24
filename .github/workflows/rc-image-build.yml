@@ -19,10 +19,10 @@
 # secret. KUBECONFIG_YAML is the only GH Actions secret that drives the build.
 name: RC image build
 
+# disabled for now. Keeping reference for gha trigger
+# of local kaniko builds
 on:
-  push:
-    branches:
-      - "master"
+  workflow_dispatch:
 
 concurrency:
   group: rc-build-${{ github.ref }}

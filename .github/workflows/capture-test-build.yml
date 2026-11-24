@@ -34,7 +34,7 @@ jobs:
           docker build \
             --progress=plain \
             --file capture/Dockerfile \
-            --tag sigproc-capture:$SHA_SHORT \
+            --tag $IMAGE:$SHA_SHORT \
             .
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
@@ -43,6 +43,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push Image
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
