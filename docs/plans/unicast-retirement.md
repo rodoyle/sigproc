@@ -97,6 +97,26 @@ forwarding: the stream carries `ttl = 1`, and a routed copy would be decremented
 to 0 and dropped rather than delivered. Look for a bridge, repeater or WDS path
 between the AP and the wired segment — not `mrouted`, `smcroute` or `igmpproxy`.
 
+A passive `AF_PACKET` capture on the wired receiver's NIC proves the copy is
+verbatim rather than rebuilt: across 39,652 duplicated datagrams the two frames
+shared the same source MAC (`dc:a6:32:bc:8a:3c`, the sender's eth0), the same IP
+ID, the same `ttl = 1`, and the same source port. Over the same window the frame
+destined to `192.168.0.48` measured **exactly 1.0** copies. So an L2 device
+duplicates the frame in place — no host re-originated it, nothing rebuilt it, and
+no routed hop occurred.
+
+That clears the collector from a second and independent direction, and it retires
+the RPi-as-bridge idea as well: the AP would only deliver the group to `wlan0` if
+something there had joined it, nothing has, and with no bridge and `ttl = 1`
+there is no path for it to re-emit. The copier holds both a wireless and a wired
+foothold in this L2 — an AP in WDS/repeater mode, a mesh node with both backhauls
+live, or an extender with an Ethernet port.
+
+When diagnosing, pair copies by **(counter, destination)**, not by counter alone.
+One datagram legitimately arrives once as a unicast frame DNATed to the node
+address and once as a multicast frame to the group, so counter-only pairing
+invents duplicates and makes the healthy unicast path look duplicated.
+
 Re-confirm with two receivers at once, one on each link. A single receiver
 cannot distinguish L2 re-injection from a sender that transmits twice:
 
@@ -246,6 +266,11 @@ sha256:0b3867bb (commit 3fc93e2):**
 - `multicast_joined true`, group `239.255.49.2`, iface `192.168.0.48`.
 - Two sources, one per path: multicast `192.168.0.55:37108`,
   unicast `192.168.0.55:4508`.
+  Note the source ports are ephemeral per process: each collector restart takes
+  new ones, and `sources` holds cumulative lifetime counters, so a restarted
+  collector lists the old and new sockets side by side. The stable rule is "the
+  port that also appears at a third host is the multicast socket" — never a fixed
+  number — and more than two entries means restarts, not extra paths.
 
 Criterion 2 and 3 pass on this evidence. Criterion 4 does not: multicast is
 delivered ~1.9× per datagram, a below-application duplication that exists only
