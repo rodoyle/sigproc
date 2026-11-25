@@ -172,12 +172,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         let copy =
             vita49::Vita49Forwarder::new(&multicast.group.to_string(), multicast.port, stream_id)?;
         copy.configure_multicast(multicast.interface, multicast.ttl)?;
+        let unicast_state = if forwarder.is_some() {
+            "primary unicast retained"
+        } else {
+            "unicast retired, multicast is the sole output path"
+        };
         log::info!(
-            "LAN multicast {}:{} via {} TTL {}; primary unicast retained",
+            "LAN multicast {}:{} via {} TTL {}; {}",
             multicast.group,
             multicast.port,
             multicast.interface,
-            multicast.ttl
+            multicast.ttl,
+            unicast_state
         );
         Some(copy)
     } else {
@@ -187,11 +193,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         copy.set_context(controllee.applied);
         metrics.multicast(copy.stats());
     }
+    // Fix the authoritative output path before any HTTP reader can ask for it:
+    // with unicast retired the multicast copy is what `/state` must report.
+    metrics.set_primary_configured(forwarder.is_some());
     log::info!(
         "capture loop started: stream_id=0x{:08x}, {} samples/packet",
         stream_id,
         forwarder
             .as_ref()
+            .or(multicast_forwarder.as_ref())
             .map_or(0, |forwarder| forwarder.samples_per_packet())
     );
 
@@ -272,9 +282,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                             bandwidth_hz: controllee.applied.bandwidth_hz,
                             gain_db: controllee.applied.gain_db,
                             stream_id,
-                            packets_forwarded: forwarder
-                                .as_ref()
-                                .map_or(0, |forwarder| forwarder.stats().packets_sent),
+                            packets_forwarded: metrics.forwarded_packets(),
                             samples_forwarded: metrics.samples_total() / 2,
                             receive_errors: metrics.receive_errors_total(),
                             controls_processed: metrics.controls_total(),

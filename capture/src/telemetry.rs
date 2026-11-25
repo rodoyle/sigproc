@@ -25,6 +25,7 @@ pub struct CaptureMetrics {
     empty_reads: AtomicU64,
     controls: AtomicU64,
     multicast_enabled: AtomicBool,
+    primary_configured: AtomicBool,
     primary: Destination,
     multicast: Destination,
 }
@@ -67,6 +68,20 @@ impl CaptureMetrics {
     pub fn multicast(&self, stats: ForwarderStats) {
         self.multicast_enabled.store(true, Relaxed);
         self.multicast.update(stats);
+    }
+    /// Declare whether primary unicast is the authoritative output path. Set once,
+    /// where the forwarders are built: with unicast retired the multicast copy is
+    /// authoritative, so readers must not aggregate a primary that never advances.
+    pub fn set_primary_configured(&self, configured: bool) {
+        self.primary_configured.store(configured, Relaxed);
+    }
+    /// Packets accepted by the authoritative output path.
+    pub fn forwarded_packets(&self) -> u64 {
+        if self.primary_configured.load(Relaxed) {
+            self.primary.packets.load(Relaxed)
+        } else {
+            self.multicast.packets.load(Relaxed)
+        }
     }
 }
 
@@ -186,5 +201,39 @@ mod tests {
         assert!(m
             .render_metrics("sigproc_capture")
             .contains("sigproc_capture_sample_rate_hz 125000"));
+    }
+
+    #[test]
+    fn forwarded_packets_follow_the_authoritative_path() {
+        let live = CaptureMetrics::default();
+        live.set_primary_configured(true);
+        live.primary(ForwarderStats {
+            packets_sent: 7,
+            bytes_sent: 700,
+            packets_dropped: 0,
+        });
+        live.multicast(ForwarderStats {
+            packets_sent: 5,
+            bytes_sent: 500,
+            packets_dropped: 0,
+        });
+        assert_eq!(
+            live.forwarded_packets(),
+            7,
+            "primary is authoritative while unicast is live"
+        );
+
+        let retired = CaptureMetrics::default();
+        retired.set_primary_configured(false);
+        retired.multicast(ForwarderStats {
+            packets_sent: 5,
+            bytes_sent: 500,
+            packets_dropped: 0,
+        });
+        assert_eq!(
+            retired.forwarded_packets(),
+            5,
+            "a retired unicast path must report the multicast copy, not a frozen zero"
+        );
     }
 }

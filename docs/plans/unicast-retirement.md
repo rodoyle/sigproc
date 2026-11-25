@@ -32,8 +32,10 @@ All of these are measurable. None of them is a judgement call.
 2. **Every duplicate the consumer drops was byte-compared, and none differed.**
    This is the core criterion, and it is the one a counter alone cannot prove:
 
-   - `duplicates_compared` must be within a few units of
-     `duplicates_dropped - duplicates_fallback`,
+   - `duplicates_compared` must equal
+     `(duplicates_dropped + context_duplicates_dropped) - duplicates_fallback`,
+     up to a handful of units for a non-atomic counter snapshot: data *and* IF
+     Context duplicates are both byte-compared, and only fallbacks escape,
    - `duplicates_fallback` must be a negligible fraction of
      `duplicates_dropped` (measured: 63 of 9,604,171, i.e. 0.0007 %) — a
      fallback is a duplicate whose original had already aged out of the retained
@@ -134,7 +136,7 @@ Run the receiver on a host with exactly **one** LAN interface: a host that is
 itself multi-homed sees one copy per NIC and will fake a duplication that is not
 on the wire.
 
-## What the sender needs (already shipped)
+## What the sender needs
 
 `forwarding.vita49_dest_host` and `forwarding.vita49_dest_port` are now optional
 in `common/src/config.rs`, with three states that are deliberately distinct:
@@ -167,12 +169,36 @@ interface = "192.168.0.55"
 ttl = 1
 ```
 
+### Prerequisite: the running image and the live ConfigMap must have the target shape
+
+The optional-destination code is shipped in this repo from `bdaaa16` onward, but
+the running pod is not automatically that build, and a ConfigMap this tree accepts
+is not automatically one an older image accepts. Settle both *before* the two-line
+edit, because `Recreate` means a config the image cannot parse takes the radio and
+the service down together.
+
+| Prerequisite | Why it bites | How to check |
+| --- | --- | --- |
+| Capture runs a build at or after `bdaaa16` | earlier builds declare `vita49_dest_host: String` and `vita49_dest_port: u16`, both required, so omitting them is a startup parse error rather than a retirement | `kubectl -n default get deploy sigproc -o jsonpath='{.spec.template.spec.containers[0].image}'`. Image tags are commit short-SHAs, so `git merge-base --is-ancestor bdaaa16 <tag>` decides; `:latest` must be resolved to a digest and mapped back to its build. |
+| The live ConfigMap's Hz fields are integers | this tree parses `center_freq`/`sample_rate`/`bandwidth` as integers (`deploy/configmap.yaml` has `center_freq = 915_000_000`), so a float form such as `915_000_000.0` exits at startup on any post-`bdaaa16` image | `kubectl -n default get cm sigproc-config -o yaml` and confirm the three fields carry no decimal point. |
+| The channelizer and demod ConfigMaps keep a destination | neither has a multicast path and both refuse to start without one (`ForwardingConfig::require_unicast`), so a sweep that deletes `dest_host` everywhere stops them | `grep -n dest_host deploy/channelizer-configmap.yaml deploy/demod-configmap.yaml` |
+
+The image upgrade and the float→integer ConfigMap migration are prerequisites, not
+part of retirement. Do them together, **with unicast still configured and both
+paths live**, and confirm `/metrics` shows primary and multicast packet counters
+both advancing. A pod that fails to come up then is unambiguously a config-shape
+problem, and retirement keeps its single-variable footprint.
+
 ## Applying it without interrupting the RF path
 
 Capture holds the only handle on the B210, so its Deployment is `Recreate` with
 `strategy.rollingUpdate` removed, pinned to its node. A ConfigMap change does
 **not** restart the pod, and the sender reads its config at startup, so the
 order matters:
+
+Step 0 is not optional. Verify the prerequisites in the previous section first:
+they are the difference between a two-line retirement and a capture service that
+cannot parse its config while holding the only handle on the radio.
 
 1. Edit the live ConfigMap.
 2. Confirm the partial state is harmless: the running pod keeps using its
@@ -204,8 +230,8 @@ only once nothing uses it:
    Revisit only once `packets_received / packets_analyzed` has been 1.0 for a
    full day.
 3. **`deploy/README.md`** — the "Retirement checklist" section currently
-   describes the Service rename. It must be rewritten to point at this document
-   for path retirement, and keep the rename as a separate step.
+   describes the Service rename. It has been rewritten to point here for path
+   retirement and to keep the rename as a separate step.
 
 ## Post-retirement verification
 
@@ -221,7 +247,8 @@ curl -s http://<sender>:9087/metrics | grep -E 'packets_sent_total|multicast_ena
 
 Pass conditions:
 
-- `sources` lists **one** address — the multicast socket, port 37108-style.
+- `sources` lists **one** live address — the multicast socket, identified by the
+  port that also appears at a third host rather than by any fixed number.
 - `packets_received / packets_analyzed` ≈ `1.000`; `duplicates_dropped` flat.
 - `duplicate_mismatch`, `context_duplicate_mismatch` still `0`.
 - `sigproc_capture_multicast_packets_sent_total` advances and
@@ -237,8 +264,9 @@ still on the wire and internally consistent:
 python test/vrt_path_probe.py --group 239.255.49.2 --port 4820 \
     --interface <that host's LAN ip> --seconds 10 --strict
 ```
-
-`copies_per_packet {"1": N}` and `byte_mismatches 0` is the pass.
+`copies_per_packet {"1": N}` and `byte_mismatches 0` is the pass. Read that
+histogram rather than the exit status: `--strict` only fails above two copies, so
+a doubled multicast path alone still exits 0.
 
 ## Rollback
 
