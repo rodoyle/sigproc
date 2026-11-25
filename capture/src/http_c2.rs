@@ -59,7 +59,7 @@ pub struct ConfigResponse {
 }
 
 impl ConfigResponse {
-    fn from_context(ctx: StreamContext) -> Self {
+    pub(crate) fn from_context(ctx: StreamContext) -> Self {
         Self {
             ok: true,
             rf_freq_hz: ctx.rf_freq_hz,
@@ -69,7 +69,7 @@ impl ConfigResponse {
             error: None,
         }
     }
-    fn error(msg: impl Into<String>) -> Self {
+    pub(crate) fn error(msg: impl Into<String>) -> Self {
         Self {
             ok: false,
             rf_freq_hz: 0.0,

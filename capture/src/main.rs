@@ -14,6 +14,8 @@
 //! libuhd is not present on every build host or in every service image.
 
 use clap::Parser;
+#[cfg(feature = "uhd-support")]
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[cfg(feature = "uhd-support")]
@@ -251,16 +253,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                             gain_db: controllee.applied.gain_db,
                             stream_id,
                             packets_forwarded: forwarder.stats().packets_sent,
-                            samples_forwarded: metrics
-                                .samples
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                                / 2,
-                            receive_errors: metrics
-                                .receive_errors
-                                .load(std::sync::atomic::Ordering::Relaxed),
-                            controls_processed: metrics
-                                .controls
-                                .load(std::sync::atomic::Ordering::Relaxed),
+                            samples_forwarded: metrics.samples_total() / 2,
+                            receive_errors: metrics.receive_errors_total(),
+                            controls_processed: metrics.controls_total(),
                         };
                         let body = serde_json::to_string(&resp)
                             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));

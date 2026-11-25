@@ -45,6 +45,22 @@ impl CaptureMetrics {
     pub fn control(&self) {
         self.controls.fetch_add(1, Relaxed);
     }
+    /// Samples counted since start (interleaved I/Q values, not frames).
+    ///
+    /// Only the capture loop reports these, so they exist solely with the UHD
+    /// path; gating them keeps the default build free of unused-item lints.
+    #[cfg(feature = "uhd-support")]
+    pub fn samples_total(&self) -> u64 {
+        self.samples.load(Relaxed)
+    }
+    #[cfg(feature = "uhd-support")]
+    pub fn receive_errors_total(&self) -> u64 {
+        self.receive_errors.load(Relaxed)
+    }
+    #[cfg(feature = "uhd-support")]
+    pub fn controls_total(&self) -> u64 {
+        self.controls.load(Relaxed)
+    }
     pub fn primary(&self, stats: ForwarderStats) {
         self.primary.update(stats);
     }

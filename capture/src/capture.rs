@@ -59,11 +59,11 @@ pub fn open_usrp(device_args: &str, rf: &RfConfig) -> anyhow::Result<(Usrp, f64)
     log::info!("Opened USRP: {}", mboard);
 
     // Configure RF parameters
-    usrp.set_rx_sample_rate(rf.sample_rate, 0)?;
-    usrp.set_rx_frequency(&TuneRequest::with_frequency(rf.center_freq), 0)?;
+    usrp.set_rx_sample_rate(rf.sample_rate as f64, 0)?;
+    usrp.set_rx_frequency(&TuneRequest::with_frequency(rf.center_freq as f64), 0)?;
     usrp.set_rx_gain(rf.rx_gain, 0, "")?; // default gain element
     usrp.set_rx_antenna(&rf.antenna, 0)?;
-    usrp.set_rx_bandwidth(rf.bandwidth, 0)?;
+    usrp.set_rx_bandwidth(rf.bandwidth as f64, 0)?;
 
     let actual_rate = usrp.get_rx_sample_rate(0)?;
     let actual_freq = usrp.get_rx_frequency(0)?;
