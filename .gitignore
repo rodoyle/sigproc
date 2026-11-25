@@ -5,3 +5,9 @@ usrp_b210_fpga.bin
 *.pyc
 .ruff_cache/
 __pycache__
+
+# sigproc-sweep run artefacts: the controller lock and the pre-mutation recovery
+# file belong in the operator's working directory, not in history.
+sigproc-sweep*.lock
+sigproc-sweep-original.json
+sweep-*.json

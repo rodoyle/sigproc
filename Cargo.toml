@@ -17,7 +17,15 @@
 #   cargo test --workspace --no-default-features
 [workspace]
 resolver = "2"
-members = ["common", "capture", "channelizer", "fixture", "sink", "demod"]
+members = [
+    "common",
+    "capture",
+    "channelizer",
+    "fixture",
+    "sink",
+    "demod",
+    "sweep",
+]
 
 [workspace.package]
 version = "0.1.0"

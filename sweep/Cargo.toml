@@ -1,0 +1,13 @@
+[package]
+name = "sigproc-sweep"
+version.workspace = true
+edition.workspace = true
+description = "Bounded 140-150 MHz NBFM sweep controller driving the channelizer C2 plane"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
