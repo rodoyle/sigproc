@@ -121,7 +121,10 @@ impl ForwardingConfig {
     fn validate(&self) -> anyhow::Result<()> {
         match (&self.vita49_dest_host, self.vita49_dest_port) {
             (Some(host), Some(port)) => {
-                anyhow::ensure!(!host.trim().is_empty(), "vita49_dest_host must not be empty");
+                anyhow::ensure!(
+                    !host.trim().is_empty(),
+                    "vita49_dest_host must not be empty"
+                );
                 anyhow::ensure!(port != 0, "vita49_dest_port must be non-zero");
             }
             (None, None) => {}
@@ -441,7 +444,9 @@ mod tests {
             vita49_dest_host = "waterfall-service.default.svc.cluster.local"
         "#;
         let cfg: Config = toml::from_str(text).expect("parses");
-        let error = cfg.validate().expect_err("a host with no port must be refused");
+        let error = cfg
+            .validate()
+            .expect_err("a host with no port must be refused");
         assert!(
             error.to_string().contains("vita49_dest_port is required"),
             "unexpected error: {error}"
@@ -462,7 +467,9 @@ mod tests {
             [forwarding]
         "#;
         let cfg: Config = toml::from_str(text).expect("parses");
-        let error = cfg.validate().expect_err("a destination-less sender must be refused");
+        let error = cfg
+            .validate()
+            .expect_err("a destination-less sender must be refused");
         assert!(
             error.to_string().contains("no VITA49 destination"),
             "unexpected error: {error}"

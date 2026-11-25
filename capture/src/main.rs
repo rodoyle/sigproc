@@ -190,7 +190,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     log::info!(
         "capture loop started: stream_id=0x{:08x}, {} samples/packet",
         stream_id,
-        forwarder.as_ref().map_or(0, |forwarder| forwarder.samples_per_packet())
+        forwarder
+            .as_ref()
+            .map_or(0, |forwarder| forwarder.samples_per_packet())
     );
 
     loop {

@@ -186,9 +186,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         bandwidth_hz: 2.0 * channel.passband() as f64,
         gain_db: cfg.rf.rx_gain,
     });
-    log::info!(
-        "narrowband output -> {dest_host}:{dest_port} (stream_id=0x{stream_id:08x})",
-    );
+    log::info!("narrowband output -> {dest_host}:{dest_port} (stream_id=0x{stream_id:08x})",);
 
     let mut service = ChannelizerService::new(plan, service_cfg, forwarder, Arc::clone(&metrics));
     log::info!(
