@@ -39,6 +39,7 @@ COPY fixture/Cargo.toml fixture/
 COPY sink/Cargo.toml sink/
 COPY demod/Cargo.toml demod/
 COPY common/src/ common/src/
+COPY common/benches/ common/benches/
 COPY capture/src/ capture/src/
 COPY channelizer/src/ channelizer/src/
 COPY fixture/src/ fixture/src/
