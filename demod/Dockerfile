@@ -12,6 +12,7 @@ COPY channelizer/Cargo.toml channelizer/
 COPY fixture/Cargo.toml fixture/
 COPY sink/Cargo.toml sink/
 COPY demod/Cargo.toml demod/
+COPY sweep/Cargo.toml sweep/
 COPY common/src/ common/src/
 COPY common/benches/ common/benches/
 COPY capture/src/ capture/src/
@@ -19,6 +20,7 @@ COPY channelizer/src/ channelizer/src/
 COPY fixture/src/ fixture/src/
 COPY sink/src/ sink/src/
 COPY demod/src/ demod/src/
+COPY sweep/src/ sweep/src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
@@ -32,6 +34,7 @@ COPY channelizer/ channelizer/
 COPY fixture/ fixture/
 COPY sink/ sink/
 COPY demod/ demod/
+COPY sweep/ sweep/
 RUN cargo build --release --package sigproc-demod
 
 FROM --platform=linux/arm64 debian:trixie-slim

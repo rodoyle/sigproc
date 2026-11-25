@@ -24,6 +24,7 @@ COPY channelizer/Cargo.toml channelizer/
 COPY fixture/Cargo.toml fixture/
 COPY sink/Cargo.toml sink/
 COPY demod/Cargo.toml demod/
+COPY sweep/Cargo.toml sweep/
 COPY common/src/ common/src/
 COPY common/benches/ common/benches/
 COPY capture/src/ capture/src/
@@ -31,6 +32,7 @@ COPY channelizer/src/ channelizer/src/
 COPY fixture/src/ fixture/src/
 COPY sink/src/ sink/src/
 COPY demod/src/ demod/src/
+COPY sweep/src/ sweep/src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 3: Builder ─────────────────────────────────────────────────────────
@@ -46,6 +48,7 @@ COPY capture/ capture/
 COPY channelizer/ channelizer/
 COPY sink/ sink/
 COPY demod/ demod/
+COPY sweep/ sweep/
 RUN cargo build --release --package sigproc-fixture
 
 # ── Stage 4: Runtime ─────────────────────────────────────────────────────────
