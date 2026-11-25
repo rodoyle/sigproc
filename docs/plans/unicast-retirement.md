@@ -249,5 +249,4 @@ sha256:0b3867bb (commit 3fc93e2):**
 
 Criterion 2 and 3 pass on this evidence. Criterion 4 does not: multicast is
 delivered ~1.9× per datagram, a below-application duplication that exists only
-on the wired segment and
-is still open. Unicast therefore stays.
+on the wired segment only. It is still open, so unicast stays.
