@@ -149,9 +149,10 @@ in `common/src/config.rs`, with three states that are deliberately distinct:
 | neither | refused at startup; a sender with no destination would drop every packet |
 
 Capture treats an omitted destination as retired and logs
-`unicast is RETIRED, multicast is the only output path`. The channelizer and
-demod chain have no multicast path, so they refuse an omitted destination
-instead (`ForwardingConfig::require_unicast`).
+`unicast is RETIRED, multicast is the only output path`. The channelizer has no
+multicast path, so it refuses an omitted destination instead
+(`ForwardingConfig::require_unicast`). Demod carries no forwarding config at all —
+it consumes VITA49 and forwards nothing — so retirement cannot reach it.
 
 To retire, remove exactly two lines from the capture ConfigMap
 (`deploy/configmap.yaml`, and the live `configmap/sigproc-config`) and leave the
@@ -181,7 +182,7 @@ the service down together.
 | --- | --- | --- |
 | Capture runs a build at or after `bdaaa16` | earlier builds declare `vita49_dest_host: String` and `vita49_dest_port: u16`, both required, so omitting them is a startup parse error rather than a retirement | `kubectl -n default get deploy sigproc -o jsonpath='{.spec.template.spec.containers[0].image}'`. Image tags are commit short-SHAs, so `git merge-base --is-ancestor bdaaa16 <tag>` decides; `:latest` must be resolved to a digest and mapped back to its build. |
 | The live ConfigMap's Hz fields are integers | this tree parses `center_freq`/`sample_rate`/`bandwidth` as integers (`deploy/configmap.yaml` has `center_freq = 915_000_000`), so a float form such as `915_000_000.0` exits at startup on any post-`bdaaa16` image | `kubectl -n default get cm sigproc-config -o yaml` and confirm the three fields carry no decimal point. |
-| The channelizer and demod ConfigMaps keep a destination | neither has a multicast path and both refuse to start without one (`ForwardingConfig::require_unicast`), so a sweep that deletes `dest_host` everywhere stops them | `grep -n dest_host deploy/channelizer-configmap.yaml deploy/demod-configmap.yaml` |
+| The channelizer ConfigMap keeps a destination | it has no multicast path and refuses to start without one (`ForwardingConfig::require_unicast`), so a sweep that deletes `dest_host` from every ConfigMap stops it. Demod has no forwarding config, so only the channelizer is exposed. | `grep -n dest_host deploy/channelizer-configmap.yaml` |
 
 The image upgrade and the float→integer ConfigMap migration are prerequisites, not
 part of retirement. Do them together, **with unicast still configured and both
