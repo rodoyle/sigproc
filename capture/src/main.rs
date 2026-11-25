@@ -87,9 +87,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     log::info!("  antenna:      {}", cfg.rf.antenna);
     log::info!("  bandwidth:    {} Hz", cfg.rf.bandwidth);
     log::info!(
-        "  vita49_dest:  {}:{}",
-        cfg.forwarding.vita49_dest_host,
-        cfg.forwarding.vita49_dest_port
+        "  vita49_dest:  {}",
+        match cfg.forwarding.unicast() {
+            Some((host, port)) => format!("{host}:{port}"),
+            None => "retired (multicast only)".to_string(),
+        }
     );
 
     // ── Dry-run: probe only ──────────────────────────────────────────────
@@ -148,12 +150,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         (None, None)
     };
     let c2_auth = cfg.control.http_auth_token.clone();
-    let mut forwarder = vita49::Vita49Forwarder::new(
-        &cfg.forwarding.vita49_dest_host,
-        cfg.forwarding.vita49_dest_port,
-        stream_id,
-    )?;
-    forwarder.set_context(controllee.applied);
+    // Unicast is optional. Omitting the destination retires the unicast path and
+    // leaves the multicast copy as the only one; `Config::validate` has already
+    // guaranteed at least one destination exists, so a retired unicast here is a
+    // deliberate state and not a misconfiguration.
+    let mut forwarder = match cfg.forwarding.unicast() {
+        Some((host, port)) => {
+            let mut forwarder = vita49::Vita49Forwarder::new(host, port, stream_id)?;
+            forwarder.set_context(controllee.applied);
+            Some(forwarder)
+        }
+        None => {
+            log::warn!(
+                "forwarding.vita49_dest_host is unset: unicast is RETIRED, \
+                 multicast is the only output path"
+            );
+            None
+        }
+    };
     let mut multicast_forwarder = if let Some(multicast) = &cfg.forwarding.multicast {
         let copy =
             vita49::Vita49Forwarder::new(&multicast.group.to_string(), multicast.port, stream_id)?;
@@ -176,7 +190,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     log::info!(
         "capture loop started: stream_id=0x{:08x}, {} samples/packet",
         stream_id,
-        forwarder.samples_per_packet()
+        forwarder.as_ref().map_or(0, |forwarder| forwarder.samples_per_packet())
     );
 
     loop {
@@ -208,8 +222,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                         if let Some((ts, samples)) = batch {
                             metrics.samples(samples.len() / 2);
-                            forwarder.send(&samples, ts, controllee.applied.sample_rate_hz);
-                            metrics.primary(forwarder.stats());
+                            if let Some(forwarder) = &mut forwarder {
+                                forwarder.send(&samples, ts, controllee.applied.sample_rate_hz);
+                                metrics.primary(forwarder.stats());
+                            }
                             if let Some(copy) = &mut multicast_forwarder {
                                 copy.send(&samples, ts, controllee.applied.sample_rate_hz);
                                 metrics.multicast(copy.stats());
@@ -234,7 +250,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 &mut uhd_control::UhdControl(&mut usrp),
             )?;
             metrics.set_rate(controllee.applied.sample_rate_hz);
-            forwarder.set_context(controllee.applied);
+            if let Some(forwarder) = &mut forwarder {
+                forwarder.set_context(controllee.applied);
+            }
             if let Some(copy) = &mut multicast_forwarder {
                 copy.set_context(controllee.applied);
             }
@@ -252,7 +270,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                             bandwidth_hz: controllee.applied.bandwidth_hz,
                             gain_db: controllee.applied.gain_db,
                             stream_id,
-                            packets_forwarded: forwarder.stats().packets_sent,
+                            packets_forwarded: forwarder
+                                .as_ref()
+                                .map_or(0, |forwarder| forwarder.stats().packets_sent),
                             samples_forwarded: metrics.samples_total() / 2,
                             receive_errors: metrics.receive_errors_total(),
                             controls_processed: metrics.controls_total(),
@@ -300,7 +320,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 match controllee.apply_update(update, &mut uhd_control::UhdControl(&mut usrp)) {
                     Ok(ctx) => {
                         metrics.set_rate(ctx.sample_rate_hz);
-                        forwarder.set_context(ctx);
+                        if let Some(forwarder) = &mut forwarder {
+                            forwarder.set_context(ctx);
+                        }
                         if let Some(copy) = &mut multicast_forwarder {
                             copy.set_context(ctx);
                         }

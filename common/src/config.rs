@@ -72,13 +72,77 @@ pub struct RfConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ForwardingConfig {
-    /// Destination host for VITA49 UDP packets.
-    pub vita49_dest_host: String,
-    /// Destination port for VITA49 UDP packets.
-    pub vita49_dest_port: u16,
+    /// Destination host for VITA49 UDP unicast packets.
+    ///
+    /// `None` retires the unicast path: only the optional multicast copy is
+    /// sent. Explicit absence is preferred over an empty default so a missing
+    /// field means "no unicast" rather than "send to an empty host".
+    #[serde(default)]
+    pub vita49_dest_host: Option<String>,
+    /// Destination port for VITA49 UDP unicast packets.
+    ///
+    /// `None` retires the unicast path alongside `vita49_dest_host`.
+    #[serde(default)]
+    pub vita49_dest_port: Option<u16>,
     /// Optional additional LAN multicast copy; primary destination is preserved.
     #[serde(default)]
     pub multicast: Option<MulticastConfig>,
+}
+
+impl ForwardingConfig {
+    /// The configured unicast destination, when the unicast path is still live.
+    ///
+    /// Retiring unicast is expressed by omitting both fields, so this returns
+    /// `None` only for a fully retired sender. A host without a port (or the
+    /// reverse) is refused by [`ForwardingConfig::validate`] rather than being
+    /// silently treated as retired.
+    pub fn unicast(&self) -> Option<(&str, u16)> {
+        match (self.vita49_dest_host.as_deref(), self.vita49_dest_port) {
+            (Some(host), Some(port)) => Some((host, port)),
+            _ => None,
+        }
+    }
+
+    /// Require a unicast destination, for services that have no multicast path.
+    ///
+    /// The channelizer and demod chain fan out to a peer over unicast only, so
+    /// for them an omitted destination is a configuration error, not a
+    /// retirement. Capture, which owns the multicast copy, uses
+    /// [`ForwardingConfig::unicast`] and treats absence as retired.
+    pub fn require_unicast(&self) -> anyhow::Result<(&str, u16)> {
+        self.unicast().ok_or_else(|| {
+            anyhow::anyhow!(
+                "forwarding.vita49_dest_host and forwarding.vita49_dest_port are required: \
+                 this service has no multicast destination to fall back on"
+            )
+        })
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        match (&self.vita49_dest_host, self.vita49_dest_port) {
+            (Some(host), Some(port)) => {
+                anyhow::ensure!(!host.trim().is_empty(), "vita49_dest_host must not be empty");
+                anyhow::ensure!(port != 0, "vita49_dest_port must be non-zero");
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                anyhow::bail!("vita49_dest_port is required when vita49_dest_host is set")
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("vita49_dest_host is required when vita49_dest_port is set")
+            }
+        }
+        if let Some(multicast) = &self.multicast {
+            multicast.validate()?;
+        }
+        // A sender with neither destination would capture IQ and silently throw
+        // it away; that is a retirement mistake, not a valid configuration.
+        anyhow::ensure!(
+            self.vita49_dest_host.is_some() || self.multicast.is_some(),
+            "no VITA49 destination: set forwarding.vita49_dest_host/port or forwarding.multicast"
+        );
+        Ok(())
+    }
 }
 
 fn default_antenna() -> String {
@@ -295,13 +359,8 @@ impl Config {
         if self.rf.bandwidth == 0 {
             anyhow::bail!("bandwidth must be positive (Hz), got {}", self.rf.bandwidth);
         }
-        if self.forwarding.vita49_dest_port == 0 {
-            anyhow::bail!("vita49_dest_port must be non-zero");
-        }
+        self.forwarding.validate()?;
         self.control.validate()?;
-        if let Some(multicast) = &self.forwarding.multicast {
-            multicast.validate()?;
-        }
         self.input.validate()?;
         if let Some(channel) = &self.channel {
             channel.validate(self.rf.sample_rate)?;
@@ -333,12 +392,81 @@ mod tests {
         let cfg: Config = toml::from_str(&text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(
-            cfg.forwarding.vita49_dest_host,
-            "waterfall-service.default.svc.cluster.local"
+            cfg.forwarding.unicast(),
+            Some(("waterfall-service.default.svc.cluster.local", 4820))
         );
         let multicast = cfg.forwarding.multicast.unwrap();
         assert_eq!(multicast.group.to_string(), "239.255.49.2");
         assert_eq!(multicast.ttl, 1);
+    }
+
+    /// Retiring unicast is a supported end state, not an accident: with only the
+    /// multicast copy configured, the config must parse and validate, and the
+    /// unicast accessor must report the path as gone.
+    #[test]
+    fn unicast_can_be_retired_when_a_multicast_copy_is_configured() {
+        let text = r#"
+            [device]
+            device_args = ""
+            [rf]
+            center_freq = 915_000_000
+            sample_rate = 2_000_000
+            rx_gain = 30.0
+            antenna = "RX2"
+            bandwidth = 2_000_000
+            [forwarding.multicast]
+            group = "239.255.49.2"
+            port = 4820
+            interface = "192.0.2.55"
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parses without a unicast destination");
+        cfg.validate().expect("multicast-only validates");
+        assert_eq!(cfg.forwarding.unicast(), None);
+        assert!(cfg.forwarding.multicast.is_some());
+        // Services without a multicast path cannot run retired.
+        assert!(cfg.forwarding.require_unicast().is_err());
+    }
+
+    /// Half a unicast destination is a typo, not a retirement. Treating it as
+    /// "no unicast" would silently stop sending to a host the operator named.
+    #[test]
+    fn a_unicast_host_without_a_port_is_refused() {
+        let text = r#"
+            [rf]
+            center_freq = 915_000_000
+            sample_rate = 2_000_000
+            rx_gain = 30.0
+            bandwidth = 2_000_000
+            [forwarding]
+            vita49_dest_host = "waterfall-service.default.svc.cluster.local"
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parses");
+        let error = cfg.validate().expect_err("a host with no port must be refused");
+        assert!(
+            error.to_string().contains("vita49_dest_port is required"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(cfg.forwarding.unicast(), None);
+    }
+
+    /// A sender with no destination at all would capture IQ and drop every
+    /// packet; that is a retirement mistake, so it must fail fast.
+    #[test]
+    fn a_config_with_no_destination_at_all_is_refused() {
+        let text = r#"
+            [rf]
+            center_freq = 915_000_000
+            sample_rate = 2_000_000
+            rx_gain = 30.0
+            bandwidth = 2_000_000
+            [forwarding]
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parses");
+        let error = cfg.validate().expect_err("a destination-less sender must be refused");
+        assert!(
+            error.to_string().contains("no VITA49 destination"),
+            "unexpected error: {error}"
+        );
     }
 
     const CHANNELIZER_TOML: &str = r#"

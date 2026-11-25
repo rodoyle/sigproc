@@ -176,11 +176,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     // so it differs from the wideband stream and from other channelizers.
     let channel_freq_hz = cfg.rf.center_freq as f64 + channel.offset_hz as f64;
     let stream_id = (channel_freq_hz / 1000.0).round() as u32;
-    let mut forwarder = Vita49Forwarder::new(
-        &cfg.forwarding.vita49_dest_host,
-        cfg.forwarding.vita49_dest_port,
-        stream_id,
-    )?;
+    // The channelizer fans out over unicast only, so a missing destination is a
+    // configuration error here rather than a retired path.
+    let (dest_host, dest_port) = cfg.forwarding.require_unicast()?;
+    let mut forwarder = Vita49Forwarder::new(dest_host, dest_port, stream_id)?;
     forwarder.set_context(StreamContext {
         rf_freq_hz: channel_freq_hz,
         sample_rate_hz: channel.output_rate_hz as f64,
@@ -188,10 +187,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         gain_db: cfg.rf.rx_gain,
     });
     log::info!(
-        "narrowband output -> {}:{} (stream_id=0x{:08x})",
-        cfg.forwarding.vita49_dest_host,
-        cfg.forwarding.vita49_dest_port,
-        stream_id
+        "narrowband output -> {dest_host}:{dest_port} (stream_id=0x{stream_id:08x})",
     );
 
     let mut service = ChannelizerService::new(plan, service_cfg, forwarder, Arc::clone(&metrics));
