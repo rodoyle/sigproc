@@ -21,6 +21,8 @@ mod capture;
 
 #[cfg(any(feature = "uhd-support", test))]
 mod control;
+#[cfg(any(feature = "uhd-support", test))]
+mod http_c2;
 #[cfg(test)]
 mod profile_tests;
 #[cfg(any(feature = "uhd-support", test))]
@@ -123,6 +125,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         "sigproc_capture".into(),
         metrics.clone(),
     )?;
+    // HTTP C2 server: optional restart-free control plane sharing the sole-owner handler.
+    let c2_addr = cfg
+        .control
+        .http_c2_listen
+        .as_ref()
+        .and_then(|s| s.parse::<SocketAddr>().ok());
+    let (c2_handle, c2_rx) = if let Some(addr) = c2_addr {
+        match http_c2::spawn_c2_http(addr) {
+            Ok((handle, rx)) => {
+                log::info!("capture HTTP C2 enabled on http://{}/state", addr);
+                (Some(handle), Some(rx))
+            }
+            Err(e) => {
+                log::warn!("failed to bind capture HTTP C2 on {addr}: {e}");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let c2_auth = cfg.control.http_auth_token.clone();
     let mut forwarder = vita49::Vita49Forwarder::new(
         &cfg.forwarding.vita49_dest_host,
         cfg.forwarding.vita49_dest_port,
@@ -213,6 +236,91 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             if let Some(copy) = &mut multicast_forwarder {
                 copy.set_context(controllee.applied);
             }
+        }
+        // Drain HTTP C2 requests: bounded try_recv, mutations require bearer token.
+        // Collect pending mutations to apply after releasing the streamer.
+        let mut pending_http = Vec::new();
+        if let (Some(rx), Some(auth)) = (&c2_rx, &c2_auth) {
+            for _ in 0..8 {
+                match rx.try_recv() {
+                    Ok(http_c2::LoopRequest::State(mut stream)) => {
+                        let resp = http_c2::StateResponse {
+                            rf_freq_hz: controllee.applied.rf_freq_hz,
+                            sample_rate_hz: controllee.applied.sample_rate_hz,
+                            bandwidth_hz: controllee.applied.bandwidth_hz,
+                            gain_db: controllee.applied.gain_db,
+                            stream_id,
+                            packets_forwarded: forwarder.stats().packets_sent,
+                            samples_forwarded: metrics
+                                .samples
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                / 2,
+                            receive_errors: metrics
+                                .receive_errors
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            controls_processed: metrics
+                                .controls
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        };
+                        let body = serde_json::to_string(&resp)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+                        let _ = http_c2::write_response(
+                            &mut stream,
+                            "200 OK",
+                            "application/json",
+                            &body,
+                        );
+                    }
+                    Ok(http_c2::LoopRequest::Config {
+                        update,
+                        auth_token,
+                        stream,
+                    }) => {
+                        metrics.control();
+                        let resp = if auth_token.as_deref() != Some(auth.as_str()) {
+                            http_c2::ConfigResponse::error("unauthorized")
+                        } else {
+                            // Defer hardware application until after the streamer is released.
+                            pending_http.push((update, stream));
+                            continue;
+                        };
+                        let body = serde_json::to_string(&resp)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+                        let _ = http_c2::write_response(
+                            &mut stream,
+                            if resp.ok { "200 OK" } else { "400 Bad Request" },
+                            "application/json",
+                            &body,
+                        );
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+        // Apply each pending HTTP mutation through the sole-owner backend,
+        // replying to each client so no queued mutation is dropped.
+        for (update, stream) in pending_http {
+            let resp =
+                match controllee.apply_update(update, &mut uhd_control::UhdControl(&mut usrp)) {
+                    Ok(ctx) => {
+                        metrics.set_rate(ctx.sample_rate_hz);
+                        forwarder.set_context(ctx);
+                        if let Some(copy) = &mut multicast_forwarder {
+                            copy.set_context(ctx);
+                        }
+                        http_c2::ConfigResponse::from_context(ctx)
+                    }
+                    Err(e) => http_c2::ConfigResponse::error(e.to_string()),
+                };
+            let body =
+                serde_json::to_string(&resp).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
+            let _ = http_c2::write_response(
+                &mut stream,
+                if resp.ok { "200 OK" } else { "400 Bad Request" },
+                "application/json",
+                &body,
+            );
         }
     }
 }

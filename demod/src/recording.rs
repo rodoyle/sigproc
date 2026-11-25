@@ -77,7 +77,10 @@ impl Recorder {
         Ok(result)
     }
     pub(crate) fn set_mode(&mut self, mode: &'static str) {
-        assert!(self.active.is_none(), "cannot change mode during a recording");
+        assert!(
+            self.active.is_none(),
+            "cannot change mode during a recording"
+        );
         self.mode = mode;
     }
 

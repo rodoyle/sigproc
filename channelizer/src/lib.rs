@@ -29,6 +29,8 @@ use sigproc_common::metrics::Metrics;
 use sigproc_common::vita49;
 use std::sync::Arc;
 
+pub mod http_c2;
+
 /// Output samples accumulated before a narrowband packet is sent. Keeps packets
 /// bounded instead of emitting one datagram per input packet (which, at 40x
 /// decimation, would be ~50 samples each).
@@ -144,6 +146,49 @@ pub struct Report {
     pub discontinuities: Vec<GapRecord>,
 }
 
+/// Live state snapshot for `GET /state`. Integer Hz fields serialized as floats
+/// to match the wire contract expected by the HTTP tests and clients.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ChannelizerState {
+    pub offset_hz: f64,
+    pub output_rate_hz: f64,
+    pub passband_hz: f64,
+    pub input_rate_hz: f64,
+    pub decimation: usize,
+    pub settling_samples: usize,
+    pub packets_received: u64,
+    pub packets_dropped: u64,
+    pub seq_gaps: u64,
+    pub output_power_dbfs: Option<f32>,
+    pub peak_offset_hz: Option<f32>,
+}
+
+impl ChannelizerState {
+    /// An empty state snapshot (all zeros/nulls), for tests and initial readback.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// Request body for `POST /config`. All fields optional so a client can change
+/// just the offset or just the rate. Values are floats to match the existing
+/// DSP types; validation happens when applied.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct ReconfigRequest {
+    pub offset_hz: Option<f64>,
+    pub output_rate_hz: Option<f64>,
+}
+
+/// Response body for `POST /config`: the applied configuration readback.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReconfigResponse {
+    pub ok: bool,
+    pub offset_hz: f64,
+    pub output_rate_hz: f64,
+    pub settling_samples: usize,
+    pub error: Option<String>,
+}
+
 /// Configuration the service needs beyond the stage plan.
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
@@ -162,14 +207,14 @@ impl ServiceConfig {
     /// the one that ships.
     pub fn from_channel(
         channel: &sigproc_common::config::ChannelConfig,
-        input_rate: f64,
+        input_rate: u32,
     ) -> anyhow::Result<(Vec<StagePlan>, ServiceConfig)> {
         let plan = channel.plan(input_rate)?;
         let cfg = ServiceConfig {
-            input_rate,
-            output_rate: channel.output_rate_hz,
-            offset_hz: channel.offset_hz,
-            passband_hz: channel.passband(),
+            input_rate: input_rate as f64,
+            output_rate: channel.output_rate_hz as f64,
+            offset_hz: channel.offset_hz as f64,
+            passband_hz: channel.passband() as f64,
             stopband_db: channel.stopband_db,
         };
         Ok((plan, cfg))
@@ -192,6 +237,10 @@ pub struct ChannelizerService<S: OutputSink> {
     out_packet: Vec<Iq>,
     /// Output index of the first sample in `out_packet`.
     out_packet_first: u64,
+    /// Cumulative output time in seconds at the moment the current `out_packet`
+    /// started. Tracks wall-clock continuity across rate changes so timestamps
+    /// remain contiguous when `output_rate` changes mid-stream.
+    out_packet_time: f64,
     /// Rolling window for level/offset measurement.
     measure: Vec<Iq>,
     /// Sink drop count already mirrored into the metrics.
@@ -218,6 +267,7 @@ impl<S: OutputSink> ChannelizerService<S> {
             discontinuities: Vec::new(),
             out_packet: Vec::with_capacity(OUTPUT_PACKET_SAMPLES),
             out_packet_first: 0,
+            out_packet_time: 0.0,
             measure: Vec::with_capacity(MEASURE_BLOCK),
             sink_dropped_seen: 0,
             produced: Vec::new(),
@@ -315,6 +365,12 @@ impl<S: OutputSink> ChannelizerService<S> {
         for sample in &produced {
             if self.out_packet.is_empty() {
                 self.out_packet_first = self.samples_out_total + self.out_packet.len() as u64;
+                // Only initialize the timestamp on the very first packet. After
+                // that, flush_output_packet advances it cumulatively, which keeps
+                // timestamps contiguous across rate changes.
+                if self.samples_out_total == 0 && self.out_packet_time == 0.0 {
+                    self.out_packet_time = self.out_packet_first as f64 / self.cfg.output_rate;
+                }
             }
             self.out_packet.push(*sample);
             self.samples_out_total += 1;
@@ -362,8 +418,9 @@ impl<S: OutputSink> ChannelizerService<S> {
             return;
         }
         let sc16 = iq_to_sc16(&self.out_packet);
-        let ts = self.out_packet_first as f64 / self.cfg.output_rate;
+        let ts = self.out_packet_time;
         self.sink.send(&sc16, ts, self.cfg.output_rate);
+        self.out_packet_time += self.out_packet.len() as f64 / self.cfg.output_rate;
         self.out_packet.clear();
         self.out_packet_first = self.samples_out_total;
 
@@ -429,5 +486,131 @@ impl<S: OutputSink> ChannelizerService<S> {
     /// The stage plan, for logging the resolved channel plan at startup.
     pub fn plan(&self) -> &[StagePlan] {
         &self.plan
+    }
+
+    /// Apply a reconfiguration request inline, without restarting the pipeline.
+    ///
+    /// Returns the applied state readback for the HTTP response. On error the
+    /// config is left unchanged and the error is reported in the response.
+    pub fn apply_reconfig(&mut self, req: &crate::ReconfigRequest) -> crate::ReconfigResponse {
+        let new_offset = req.offset_hz.unwrap_or(self.cfg.offset_hz);
+        let new_rate = req.output_rate_hz.unwrap_or(self.cfg.output_rate);
+
+        // Validate the new rate divides the input rate (integer decimation only).
+        if new_rate <= 0.0 || new_rate > self.cfg.input_rate {
+            return crate::ReconfigResponse {
+                ok: false,
+                offset_hz: self.cfg.offset_hz,
+                output_rate_hz: self.cfg.output_rate,
+                settling_samples: self.channelizer.settling_samples(),
+                error: Some(format!(
+                    "output_rate_hz must be in (0, {}], got {}",
+                    self.cfg.input_rate, new_rate
+                )),
+            };
+        }
+        let ratio = self.cfg.input_rate / new_rate;
+        let rounded = ratio.round();
+        if (ratio - rounded).abs() > 1e-9 || rounded < 1.0 {
+            return crate::ReconfigResponse {
+                ok: false,
+                offset_hz: self.cfg.offset_hz,
+                output_rate_hz: self.cfg.output_rate,
+                settling_samples: self.channelizer.settling_samples(),
+                error: Some(format!(
+                    "output_rate_hz must divide input_rate_hz exactly (integer decimation); \
+                     {} / {} = {} is not a whole number",
+                    self.cfg.input_rate, new_rate, ratio
+                )),
+            };
+        }
+
+        let new_passband = (new_rate * 0.4) as u32;
+        let rate_changed = (self.cfg.output_rate - new_rate).abs() > 1e-9;
+        match self.channelizer.reconfigure(
+            new_offset,
+            self.cfg.input_rate,
+            new_rate,
+            self.cfg.stopband_db,
+            new_passband as f64,
+        ) {
+            Ok(settling) => {
+                // Flush any partial output packet before the rate change so the
+                // next packet starts cleanly at the new rate. Offset-only changes
+                // leave the partial packet intact to preserve framing.
+                if rate_changed {
+                    self.flush_output_packet();
+                }
+                self.cfg.offset_hz = new_offset;
+                self.cfg.output_rate = new_rate;
+                self.cfg.passband_hz = new_passband as f64;
+                // Reset the measurement gate so output during the new settling
+                // period is not published as measurements.
+                self.measure.clear();
+                crate::ReconfigResponse {
+                    ok: true,
+                    offset_hz: new_offset,
+                    output_rate_hz: new_rate,
+                    settling_samples: settling,
+                    error: None,
+                }
+            }
+            Err(e) => crate::ReconfigResponse {
+                ok: false,
+                offset_hz: self.cfg.offset_hz,
+                output_rate_hz: self.cfg.output_rate,
+                settling_samples: self.channelizer.settling_samples(),
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
+    /// Build a state snapshot for `GET /state`.
+    pub fn state(&self) -> crate::ChannelizerState {
+        crate::ChannelizerState {
+            offset_hz: self.cfg.offset_hz,
+            output_rate_hz: self.cfg.output_rate,
+            passband_hz: self.cfg.passband_hz,
+            input_rate_hz: self.cfg.input_rate,
+            decimation: self.channelizer.decimation(),
+            settling_samples: self.channelizer.settling_samples(),
+            packets_received: self.metrics.packets_received(),
+            packets_dropped: self.sink.dropped_packets(),
+            seq_gaps: self.metrics.seq_gaps(),
+            output_power_dbfs: self
+                .metrics
+                .output_power_dbfs()
+                .is_finite()
+                .then_some(self.metrics.output_power_dbfs()),
+            peak_offset_hz: self
+                .metrics
+                .peak_offset_hz()
+                .is_finite()
+                .then_some(self.metrics.peak_offset_hz()),
+        }
+    }
+
+    /// Drain pending HTTP requests from the C2 channel and process them inline.
+    ///
+    /// Called after each UDP receive in the main loop. Uses `try_recv` so it
+    /// never blocks sample processing; each request writes its HTTP response
+    /// directly to the socket.
+    pub fn drain_c2_requests(&mut self, rx: &std::sync::mpsc::Receiver<http_c2::LoopRequest>) {
+        while let Ok(req) = rx.try_recv() {
+            match req {
+                http_c2::LoopRequest::State(mut stream) => {
+                    let state = self.state();
+                    let body = serde_json::to_string(&state).unwrap_or_else(|_| "{}".to_string());
+                    let _ =
+                        http_c2::write_response(&mut stream, "200 OK", "application/json", &body);
+                }
+                http_c2::LoopRequest::Config(req, mut stream) => {
+                    let resp = self.apply_reconfig(&req);
+                    let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+                    let status = if resp.ok { "200 OK" } else { "400 Bad Request" };
+                    let _ = http_c2::write_response(&mut stream, status, "application/json", &body);
+                }
+            }
+        }
     }
 }

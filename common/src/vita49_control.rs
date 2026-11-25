@@ -166,7 +166,11 @@ pub(super) fn parse_command(buf: &[u8]) -> Result<ParsedCommand, ParseError> {
             if cam & CAM_ERRORS != 0 {
                 CAM_ACK_REJECTED
             } else {
-                if cam & CAM_EXECUTED != 0 { CAM_ACK_APPLIED } else { 0 }
+                if cam & CAM_EXECUTED != 0 {
+                    CAM_ACK_APPLIED
+                } else {
+                    0
+                }
             }
         } else {
             (cam >> 23) & 3
@@ -210,7 +214,9 @@ impl Controllee {
         let cam_ok = cmd.cam & ((1 << 30) | (1 << 28) | (7 << 12)) == 0;
         let fields_ok = cmd.cif0 != 0 && cmd.cif0 & !SUPPORTED == 0;
         if !identity_ok || !header_ok || !cam_ok || !fields_ok {
-            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
+            return Ok(PreparedControl::Reply(
+                self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS),
+            ));
         }
         if action == 0 && query {
             return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_QUERY_STATE)));
@@ -219,7 +225,9 @@ impl Controllee {
         // whether UHD can apply a setting. Contradictory query/action modes
         // must never be treated as hardware-changing commands.
         if action != 2 || query {
-            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
+            return Ok(PreparedControl::Reply(
+                self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS),
+            ));
         }
         let before = self.applied;
         let requested = StreamContext {
@@ -229,7 +237,9 @@ impl Controllee {
             gain_db: cmd.update.gain_db.unwrap_or(before.gain_db),
         };
         if !valid(requested) {
-            return Ok(PreparedControl::Reply(self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS)));
+            return Ok(PreparedControl::Reply(
+                self.ack(&cmd, CAM_EXECUTION_ACK | CAM_ERRORS),
+            ));
         }
         Ok(PreparedControl::Execute(PendingExecute {
             stream_id: self.stream_id,
@@ -260,7 +270,28 @@ impl Controllee {
         }
         Ok(self.ack(&pending.command, cam))
     }
+    /// Apply a ControlUpdate directly through the backend, bypassing VITA49
+    /// command parsing. Used by the HTTP C2 path which carries ControlUpdate
+    /// values rather than wire-format datagrams. Returns the applied readback.
+    pub fn apply_update<B: ControlBackend>(
+        &mut self,
+        update: ControlUpdate,
+        backend: &mut B,
+    ) -> anyhow::Result<StreamContext> {
+        let requested = StreamContext {
+            rf_freq_hz: update.rf_freq_hz.unwrap_or(self.applied.rf_freq_hz),
+            sample_rate_hz: update.sample_rate_hz.unwrap_or(self.applied.sample_rate_hz),
+            bandwidth_hz: update.bandwidth_hz.unwrap_or(self.applied.bandwidth_hz),
+            gain_db: update.gain_db.unwrap_or(self.applied.gain_db),
+        };
+        anyhow::ensure!(valid(requested), "invalid RF configuration");
+        let applied = backend.apply_and_readback(update)?;
+        anyhow::ensure!(valid(applied), "invalid hardware control readback");
+        self.applied = applied;
+        Ok(applied)
+    }
 
+    /// Compatibility wrapper for clients that do not hold an RX streamer.
     /// Compatibility wrapper for clients that do not hold an RX streamer.
     pub fn handle<B: ControlBackend>(
         &mut self,

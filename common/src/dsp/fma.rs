@@ -81,8 +81,8 @@ pub fn test_fma_kernel() -> Result<(), String> {
 
     fused_multiply_add_kernel(&a, &b, &mut c)?;
 
-    for i in 0..c.len() {
-        println!("c[{}] = {}", i, c[i]);
+    for (i, value) in c.iter().enumerate() {
+        println!("c[{i}] = {value}");
     }
 
     Ok(())

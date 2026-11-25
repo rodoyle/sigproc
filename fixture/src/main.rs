@@ -151,12 +151,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     // Refuse to clip. A clipped fixture would silently turn every downstream
     // amplitude assertion into a measurement of the clipper.
     anyhow::ensure!(peak <= 1.0, "peak amplitude {peak} exceeds full scale");
-    let (bytes, packets) = vita49_stream(
-        &iq,
-        cli.sample_rate,
-        cli.samples_per_packet,
-        cli.start_secs,
-    );
+    let (bytes, packets) =
+        vita49_stream(&iq, cli.sample_rate, cli.samples_per_packet, cli.start_secs);
 
     let file = std::fs::File::create(&cli.out)
         .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", cli.out.display()))?;

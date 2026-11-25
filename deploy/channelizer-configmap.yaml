@@ -5,6 +5,9 @@
 # (only sample_rate drives the channel plan; center_freq and the gain fields are
 # part of the shared schema and recorded for clarity). The channelizer never
 # touches a radio — that is the whole point of the service split.
+#
+# Frequency fields are integers (Hz) per project convention: anything in hertz
+# is an integer number. center_freq is u64 because the B210 tunes up to ~6 GHz.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,11 +19,11 @@ data:
   config.toml: |
     [rf]
     # Wideband input stream: 915 MHz ISM, 2 MS/s.
-    center_freq = 915_000_000.0
-    sample_rate = 2_000_000.0
+    center_freq = 915_000_000
+    sample_rate = 2_000_000
     rx_gain = 30.0
     antenna = "RX2"
-    bandwidth = 2_000_000.0
+    bandwidth = 2_000_000
 
     [forwarding]
     # The standalone demod is the production narrowband terminus. Its dedicated
@@ -35,12 +38,15 @@ data:
     mode = "udp"
     listen = "0.0.0.0:4810"
     metrics_listen = "0.0.0.0:8080"
+    # HTTP control plane for restart-free state/config changes.
+    # Empty disables it.
+    c2_listen = "0.0.0.0:4820"
 
     [channel]
     # 915 MHz + 200 kHz, decimated 2 MS/s -> 50 kS/s (40 = 10 x 4).
     # 48 kS/s is deliberately NOT used: 2e6/48e3 is not a whole number, and the
     # config loader refuses it with that reason.
-    offset_hz = 200_000.0
-    output_rate_hz = 50_000.0
+    offset_hz = 200_000
+    output_rate_hz = 50_000
     # 6.25 kHz half-width gives the selected channel a 12.5 kHz total bandwidth.
-    passband_hz = 6_250.0
+    passband_hz = 6_250

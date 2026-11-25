@@ -158,10 +158,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Arc::clone(&metrics),
     )?;
 
+    // HTTP control plane (restart-free state/config), spawned only when enabled.
+    let _c2 = if cfg.input.c2_listen.is_empty() {
+        None
+    } else {
+        let addr = cfg
+            .input
+            .c2_listen
+            .parse()
+            .map_err(|e| anyhow::anyhow!("[input] c2_listen: {e}"))?;
+        let (handle, rx, bound) = sigproc_channelizer::http_c2::spawn_c2_http(addr)?;
+        log::info!("channelizer C2 control plane listening on http://{bound}");
+        Some((handle, rx))
+    };
     // Downstream destination for the narrowband stream.
     // Stream ID: the narrowband channel's absolute centre frequency in kHz,
     // so it differs from the wideband stream and from other channelizers.
-    let channel_freq_hz = cfg.rf.center_freq + channel.offset_hz;
+    let channel_freq_hz = cfg.rf.center_freq as f64 + channel.offset_hz as f64;
     let stream_id = (channel_freq_hz / 1000.0).round() as u32;
     let mut forwarder = Vita49Forwarder::new(
         &cfg.forwarding.vita49_dest_host,
@@ -170,8 +183,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     )?;
     forwarder.set_context(StreamContext {
         rf_freq_hz: channel_freq_hz,
-        sample_rate_hz: channel.output_rate_hz,
-        bandwidth_hz: 2.0 * channel.passband(),
+        sample_rate_hz: channel.output_rate_hz as f64,
+        bandwidth_hz: 2.0 * channel.passband() as f64,
         gain_db: cfg.rf.rx_gain,
     });
     log::info!(
@@ -205,9 +218,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     Ok(raw) => {
                         let outcome = service.process_datagram(raw);
                         replayed_packets += 1;
+                        if let Some((ref _handle, ref rx)) = _c2 {
+                            service.drain_c2_requests(rx);
+                        }
                         if realtime {
                             let elapsed = started.elapsed().as_secs_f64();
-                            let produced = outcome.samples_in as f64 / input_rate;
+                            let produced = outcome.samples_in as f64 / input_rate as f64;
                             if produced > elapsed {
                                 std::thread::sleep(std::time::Duration::from_secs_f64(
                                     produced - elapsed,
@@ -247,6 +263,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 match socket.recv_from(&mut buf) {
                     Ok((n, _from)) => {
                         service.process_datagram(&buf[..n]);
+                        if let Some((ref _handle, ref rx)) = _c2 {
+                            service.drain_c2_requests(rx);
+                        }
                     }
                     Err(ref e)
                         if e.kind() == std::io::ErrorKind::WouldBlock

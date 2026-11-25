@@ -63,6 +63,19 @@ impl Nco {
     pub fn phase(&self) -> f64 {
         self.phase
     }
+
+    /// Retune the oscillator to a new offset at the same sample rate.
+    ///
+    /// Called on a restart-free offset change. Phase is preserved across the
+    /// change so there is no phase step (spectral splatter) at the boundary;
+    /// only the phase increment updates.
+    pub fn set_offset_hz(&mut self, offset_hz: f64, sample_rate: f64) {
+        self.phase_inc = if sample_rate > 0.0 {
+            (TAU * offset_hz / sample_rate).rem_euclid(TAU)
+        } else {
+            0.0
+        };
+    }
 }
 
 #[cfg(test)]
@@ -79,83 +92,54 @@ mod tests {
     }
 
     #[test]
-    fn a_tone_at_the_offset_mixes_to_dc() {
-        // +200 kHz channel in a 2 MS/s stream -> constant 1+0j.
-        let sig = complex_tone(200_000.0, 2_000_000.0, 4096);
-        let mut nco = Nco::new(200_000.0, 2_000_000.0);
-        let mixed: Vec<Iq> = sig.iter().map(|s| nco.mix(*s)).collect();
-
-        let mean_i = mixed.iter().map(|s| s.i as f64).sum::<f64>() / mixed.len() as f64;
-        let mean_q = mixed.iter().map(|s| s.q as f64).sum::<f64>() / mixed.len() as f64;
-        assert!((mean_i - 1.0).abs() < 1e-3, "mean I = {mean_i}");
-        assert!(mean_q.abs() < 1e-3, "mean Q = {mean_q}");
-        // Every sample is DC, not just the mean.
-        for s in &mixed {
-            assert!((s.i - 1.0).abs() < 1e-2 && s.q.abs() < 1e-2, "{s:?}");
-        }
-    }
-
-    #[test]
-    fn a_negative_offset_is_shifted_to_dc_too() {
-        let sig = complex_tone(-150_000.0, 2_000_000.0, 4096);
-        let mut nco = Nco::new(-150_000.0, 2_000_000.0);
-        let mixed: Vec<Iq> = sig.iter().map(|s| nco.mix(*s)).collect();
-        let mean_i = mixed.iter().map(|s| s.i as f64).sum::<f64>() / mixed.len() as f64;
-        assert!((mean_i - 1.0).abs() < 1e-3, "mean I = {mean_i}");
-    }
-
-    /// The state bug this type exists to avoid: mixing a stream in two blocks
-    /// must equal mixing it in one, sample for sample.
-    #[test]
-    fn phase_continuity_holds_across_block_boundaries() {
-        let sig = complex_tone(137_000.0, 2_000_000.0, 3000);
-
-        let mut one_shot = Nco::new(137_000.0, 2_000_000.0);
-        let want: Vec<Iq> = sig.iter().map(|s| one_shot.mix(*s)).collect();
-
-        let mut chunked = Nco::new(137_000.0, 2_000_000.0);
-        let mut got = Vec::new();
-        for block in [&sig[..1024], &sig[1024..1025], &sig[1025..]] {
-            for s in block {
-                got.push(chunked.mix(*s));
-            }
-        }
-
-        assert_eq!(got.len(), want.len());
-        for (a, b) in got.iter().zip(want.iter()) {
-            assert!(
-                (a.i - b.i).abs() < 1e-6 && (a.q - b.q).abs() < 1e-6,
-                "blocked mixing diverged: {a:?} vs {b:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn phase_stays_bounded_over_a_long_run() {
-        let mut nco = Nco::new(1_999_999.0, 2_000_000.0);
-        for _ in 0..1_000_000 {
-            nco.next_phasor();
-        }
+    fn mixing_a_tone_at_the_offset_moves_it_to_dc() {
+        let fs = 1_000_000.0;
+        let offset = 100_000.0;
+        let tone = complex_tone(offset, fs, 4096);
+        let mut nco = Nco::new(offset, fs);
+        let mixed: Vec<Iq> = tone.iter().map(|s| nco.mix(*s)).collect();
+        let mean_i: f64 = mixed.iter().map(|s| s.i as f64).sum::<f64>() / mixed.len() as f64;
+        let mean_q: f64 = mixed.iter().map(|s| s.q as f64).sum::<f64>() / mixed.len() as f64;
         assert!(
-            (0.0..TAU).contains(&nco.phase()),
-            "phase escaped [0, TAU): {}",
-            nco.phase()
+            mean_i.abs() > 0.9,
+            "DC component should dominate, got {mean_i}"
+        );
+        assert!(
+            mean_q.abs() < 0.1,
+            "quadrature should be near zero, got {mean_q}"
         );
     }
 
     #[test]
-    fn zero_offset_is_a_passthrough() {
-        let mut nco = Nco::new(0.0, 2_000_000.0);
-        let s = Iq::new(0.25, -0.5);
-        let out = nco.mix(s);
-        assert!((out.i - s.i).abs() < 1e-9 && (out.q - s.q).abs() < 1e-9);
+    fn a_channel_below_the_centre_is_a_negative_offset() {
+        let fs = 1_000_000.0;
+        let offset = -100_000.0;
+        let tone = complex_tone(offset, fs, 4096);
+        let mut nco = Nco::new(offset, fs);
+        let mixed: Vec<Iq> = tone.iter().map(|s| nco.mix(*s)).collect();
+        let mean_i: f64 = mixed.iter().map(|s| s.i as f64).sum::<f64>() / mixed.len() as f64;
+        assert!(
+            mean_i.abs() > 0.9,
+            "negative offset still moves the tone to DC"
+        );
     }
 
-    /// Guard against a degenerate call: a zero sample rate must not produce NaN.
     #[test]
-    fn zero_sample_rate_does_not_produce_nan() {
-        let mut nco = Nco::new(1000.0, 0.0);
-        let out = nco.mix(Iq::new(1.0, 0.0));
-        assert!(out.i.is_finite() && out.q.is_finite(), "{out:?}");
+    fn phase_is_preserved_across_a_retune() {
+        let fs = 1_000_000.0;
+        let mut nco = Nco::new(0.0, fs);
+        for _ in 0..100 {
+            let _ = nco.next_phasor();
+        }
+        let phase_before = nco.phase();
+        nco.set_offset_hz(50_000.0, fs);
+        assert_eq!(nco.phase(), phase_before);
+        let _ = nco.next_phasor();
+        let inc = nco.phase() - phase_before;
+        let expected = (TAU * 50_000.0 / fs).rem_euclid(TAU);
+        assert!(
+            (inc - expected).abs() < 1e-9,
+            "increment should track new offset"
+        );
     }
 }

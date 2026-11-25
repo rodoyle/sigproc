@@ -2,6 +2,7 @@
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+/// Configuration for the capture control plane (VITA49.2 UDP + optional HTTP C2).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ControlConfig {
@@ -12,6 +13,10 @@ pub struct ControlConfig {
     pub authorized_controller: Option<SocketAddr>,
     /// Stable across retunes and restarts with the same configuration.
     pub stream_id: u32,
+    /// Bearer token required on HTTP mutations (`POST /config`). GET /state is
+    /// read-only and does not require it. Empty disables HTTP mutations entirely.
+    pub http_c2_listen: Option<String>,
+    pub http_auth_token: Option<String>,
 }
 
 impl Default for ControlConfig {
@@ -22,6 +27,8 @@ impl Default for ControlConfig {
             ctrl_port: 4991,
             authorized_controller: None,
             stream_id: 1,
+            http_c2_listen: None,
+            http_auth_token: None,
         }
     }
 }

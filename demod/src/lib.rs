@@ -157,11 +157,10 @@ impl Demod for NbfmDemod {
                 let frequency = if cross == 0.0 && dot == 0.0 {
                     0.0
                 } else {
-                    cross.atan2(dot) * f64::from(NATIVE_SAMPLE_RATE_HZ)
-                        / (TAU * self.deviation_hz)
+                    cross.atan2(dot) * f64::from(NATIVE_SAMPLE_RATE_HZ) / (TAU * self.deviation_hz)
                 };
-                let dc_output = frequency - self.previous_frequency
-                    + self.dc_pole * self.previous_dc_output;
+                let dc_output =
+                    frequency - self.previous_frequency + self.dc_pole * self.previous_dc_output;
                 self.previous_frequency = frequency;
                 self.previous_dc_output = dc_output;
                 self.previous_audio += self.audio_alpha * (dc_output - self.previous_audio);

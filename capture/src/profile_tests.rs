@@ -68,8 +68,10 @@ fn external_layout_with_ids_and_message_id_is_not_our_builder_roundtrip() {
     assert_eq!(ctl.applied.rf_freq_hz, 100e6);
     // Independent decode: header ACK flag, CAM IDs, echoed Message ID and ID.
     let words: Vec<u32> = ack
-        .chunks_exact(4)
-        .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_be_bytes(*w))
         .collect();
     assert_ne!(words[0] & (1 << 26), 0);
     assert_eq!(words[0] & 0xffff, words.len() as u32);

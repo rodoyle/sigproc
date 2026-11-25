@@ -219,8 +219,8 @@ pub fn run_udp(
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
                     ) => {}
                 Err(error) => return Err(error.into()),
             }

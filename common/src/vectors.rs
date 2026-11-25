@@ -91,8 +91,8 @@ impl NbfmTone {
         (0..self.samples())
             .map(|k| {
                 let t = k as f64 / self.sample_rate;
-                let phase = TAU * self.offset_hz * t
-                    + modulation_index * (TAU * self.tone_hz * t).sin();
+                let phase =
+                    TAU * self.offset_hz * t + modulation_index * (TAU * self.tone_hz * t).sin();
                 Iq::new(
                     (self.amplitude * phase.cos()) as f32,
                     (self.amplitude * phase.sin()) as f32,

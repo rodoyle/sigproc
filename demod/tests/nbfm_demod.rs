@@ -35,9 +35,15 @@ fn nbfm_demod_recovers_fixture_tones_from_vita49_within_five_hz() {
         assert_eq!(audio.len(), input.len());
         assert!(audio.iter().all(|x| x.is_finite()));
         let settled = &audio[5_000..];
-        assert!(rms(settled) > 0.2, "recovered audio must have useful energy");
+        assert!(
+            rms(settled) > 0.2,
+            "recovered audio must have useful energy"
+        );
         let mean = settled.iter().map(|&x| f64::from(x)).sum::<f64>() / settled.len() as f64;
-        assert!(mean.abs() < 0.01, "carrier offset leaked into audio: {mean}");
+        assert!(
+            mean.abs() < 0.01,
+            "carrier offset leaked into audio: {mean}"
+        );
         let real: Vec<Iq> = settled.iter().map(|&x| Iq::new(x, 0.0)).collect();
         let got = estimate_frequency(&real, 50_000.0, 100.0, 5_000.0).expect("audio tone found");
         assert!(
@@ -138,7 +144,10 @@ fn default_service_records_nbfm_wav_and_sidecar_with_expected_tone() {
     let sidecar = std::fs::read_dir(&directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .expect("completed sidecar");
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(sidecar).unwrap()).unwrap();
@@ -148,17 +157,22 @@ fn default_service_records_nbfm_wav_and_sidecar_with_expected_tone() {
     let wav = std::fs::read(directory.join(metadata["wav_file"].as_str().unwrap())).unwrap();
     assert_eq!(metadata["first_input_sample"], 0);
     assert_eq!(metadata["first_output_sample"], 0);
-    assert_eq!(metadata["boundary"], serde_json::json!({
-        "kind": "context_change",
-        "input_sample": null,
-        "missing_samples": null,
-        "output_sample": 0,
-        "recording_sample": 0,
-    }));
+    assert_eq!(
+        metadata["boundary"],
+        serde_json::json!({
+            "kind": "context_change",
+            "input_sample": null,
+            "missing_samples": null,
+            "output_sample": 0,
+            "recording_sample": 0,
+        })
+    );
     let audio: Vec<Iq> = wav[44..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .skip(5_000)
-        .map(|bytes| Iq::new(i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32767.0, 0.0))
+        .map(|bytes| Iq::new(i16::from_le_bytes(*bytes) as f32 / 32767.0, 0.0))
         .collect();
     let measured = estimate_frequency(&audio, 50_000.0, 100.0, 5_000.0).unwrap();
     assert!((measured - 1_000.0).abs() <= 5.0, "measured {measured} Hz");

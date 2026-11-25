@@ -16,10 +16,10 @@ use sigproc_common::vectors::{vita49_stream, AmTone};
 use sigproc_common::vita49::{build_packet, PacketCursor};
 use std::sync::Arc;
 
-const INPUT_RATE: f64 = 2_000_000.0;
-const OUTPUT_RATE: f64 = 50_000.0;
+const INPUT_RATE: u32 = 2_000_000;
+const OUTPUT_RATE: u32 = 50_000;
 
-fn service(offset_hz: f64) -> ChannelizerService<CollectingSink> {
+fn service(offset_hz: i64) -> ChannelizerService<CollectingSink> {
     let channel = ChannelConfig {
         offset_hz,
         output_rate_hz: OUTPUT_RATE,
@@ -42,7 +42,7 @@ fn fixture(signal_offset_hz: f64, seconds: f64) -> Vec<u8> {
     let spec = AmTone {
         tone_hz: 1000.0,
         offset_hz: signal_offset_hz,
-        sample_rate: INPUT_RATE,
+        sample_rate: INPUT_RATE as f64,
         seconds,
         depth: 0.5,
         amplitude: 0.5,
@@ -70,7 +70,7 @@ fn feed_all(svc: &mut ChannelizerService<CollectingSink>, bytes: &[u8]) -> usize
 #[test]
 fn replay_of_a_fixture_delivers_the_expected_rate_tone_and_centred_channel() {
     let bytes = fixture(200_000.0, 0.25);
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     let fed = feed_all(&mut svc, &bytes);
     assert_eq!(fed, 245, "0.25 s at 2 MS/s in 2048-sample packets");
 
@@ -84,10 +84,11 @@ fn replay_of_a_fixture_delivers_the_expected_rate_tone_and_centred_channel() {
     // Exact integer decimation: 500 000 / 40.
     assert_eq!(report.samples_out, 12_500);
     assert_eq!(report.decimation, 40);
-    assert_eq!(sink.rate, OUTPUT_RATE);
+    assert_eq!(sink.rate, OUTPUT_RATE as f64);
 
     // The modulation survived channelization: the envelope still carries 1 kHz.
-    let tone = envelope_tone_hz(&sink.samples(), OUTPUT_RATE, 50.0, 5_000.0).expect("tone found");
+    let tone =
+        envelope_tone_hz(&sink.samples(), OUTPUT_RATE as f64, 50.0, 5_000.0).expect("tone found");
     assert!((tone - 1000.0).abs() < 1.0, "recovered {tone} Hz");
 
     // The carrier sits at the channel centre, so the offset metric is ~0 — not
@@ -130,7 +131,7 @@ fn gap_marking() {
         ablated.extend_from_slice(packet);
     }
 
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     let fed = feed_all(&mut svc, &ablated);
     let (report, _sink) = svc.finish_with_sink();
 
@@ -156,11 +157,15 @@ fn gap_marking() {
 fn malformed_input_is_counted_not_fatal_on_the_udp_path() {
     // Datagrams are independently framed, so one corrupt datagram costs exactly
     // one packet: the service must keep running.
-    let first = build_packet(&vec![100i16; 2048 * 2], 0.0, INPUT_RATE);
-    let second = build_packet(&vec![100i16; 2048 * 2], 2048.0 / INPUT_RATE, INPUT_RATE);
+    let first = build_packet(&vec![100i16; 2048 * 2], 0.0, INPUT_RATE as f64);
+    let second = build_packet(
+        &vec![100i16; 2048 * 2],
+        2048.0 / INPUT_RATE as f64,
+        INPUT_RATE as f64,
+    );
     let garbage = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x00];
 
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     assert!(!svc.process_datagram(&first).malformed);
     assert!(
         svc.process_datagram(&garbage).malformed,
@@ -185,14 +190,18 @@ fn malformed_input_is_counted_not_fatal_on_the_udp_path() {
 /// record ends the walk rather than having the remainder guessed at.
 #[test]
 fn a_framing_error_in_a_file_is_counted_and_ends_the_walk() {
-    let first = build_packet(&vec![100i16; 2048 * 2], 0.0, INPUT_RATE);
-    let second = build_packet(&vec![100i16; 2048 * 2], 2048.0 / INPUT_RATE, INPUT_RATE);
+    let first = build_packet(&vec![100i16; 2048 * 2], 0.0, INPUT_RATE as f64);
+    let second = build_packet(
+        &vec![100i16; 2048 * 2],
+        2048.0 / INPUT_RATE as f64,
+        INPUT_RATE as f64,
+    );
 
     let mut stream = first;
     stream.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00]);
     stream.extend_from_slice(&second);
 
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     let fed = feed_all(&mut svc, &stream);
     let (report, _sink) = svc.finish_with_sink();
 
@@ -207,7 +216,7 @@ fn a_framing_error_in_a_file_is_counted_and_ends_the_walk() {
 #[test]
 fn output_packets_are_bounded_and_timestamps_are_contiguous() {
     let bytes = fixture(200_000.0, 0.1);
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     feed_all(&mut svc, &bytes);
     let (report, sink) = svc.finish_with_sink();
     assert!(report.ok, "{report:?}");
@@ -231,7 +240,7 @@ fn output_packets_are_bounded_and_timestamps_are_contiguous() {
 
     // Timestamps advance by exactly one packet's worth of time: no drift, and no
     // dependence on packet arrival timing.
-    let step = OUTPUT_PACKET_SAMPLES as f64 / OUTPUT_RATE;
+    let step = OUTPUT_PACKET_SAMPLES as f64 / OUTPUT_RATE as f64;
     let stamps = sink.timestamps();
     for (i, pair) in stamps.windows(2).enumerate() {
         let delta = pair[1] - pair[0];
@@ -251,7 +260,7 @@ fn output_packets_are_bounded_and_timestamps_are_contiguous() {
 #[test]
 fn level_and_offset_are_not_published_before_settling() {
     let bytes = fixture(200_000.0, 0.01); // 20 000 input samples -> 500 output
-    let mut svc = service(200_000.0);
+    let mut svc = service(200_000);
     feed_all(&mut svc, &bytes);
     let (report, _sink) = svc.finish_with_sink();
 
@@ -270,7 +279,7 @@ fn level_and_offset_are_not_published_before_settling() {
 #[test]
 fn an_off_centre_channel_reports_a_non_zero_offset() {
     let bytes = fixture(200_000.0, 0.25); // signal at +200 000
-    let mut svc = service(200_800.0); // channel 800 Hz high
+    let mut svc = service(200_800); // channel 800 Hz high
     feed_all(&mut svc, &bytes);
     let (report, _sink) = svc.finish_with_sink();
 
@@ -278,5 +287,139 @@ fn an_off_centre_channel_reports_a_non_zero_offset() {
     assert!(
         (offset + 800.0).abs() < 30.0,
         "expected about -800 Hz (signal below the channel centre), got {offset}"
+    );
+}
+
+/// Mid-stream offset change must preserve packet framing and timestamp continuity.
+/// Feed packets to a running service, call `apply_reconfig` with a new offset while
+/// output buffers are non-zero, then feed more packets and assert output packet
+/// framing stays bounded and timestamps remain contiguous across the change.
+#[test]
+fn mid_stream_offset_change_preserves_framing_and_timestamps() {
+    use sigproc_channelizer::ReconfigRequest;
+
+    let bytes_before = fixture(200_000.0, 0.15);
+    let bytes_after = fixture(200_000.0, 0.15);
+    let mut svc = service(200_000);
+
+    // Feed enough to produce output packets and have a partial buffer pending.
+    feed_all(&mut svc, &bytes_before);
+    assert!(
+        svc.samples_out() > OUTPUT_PACKET_SAMPLES as u64,
+        "need some output"
+    );
+
+    // Apply an offset change mid-stream while buffers are active.
+    let resp = svc.apply_reconfig(&ReconfigRequest {
+        offset_hz: Some(300_000.0),
+        output_rate_hz: None,
+    });
+    assert!(resp.ok, "offset change should succeed: {:?}", resp.error);
+    assert_eq!(resp.offset_hz, 300_000.0);
+
+    // Feed more packets after the change.
+    feed_all(&mut svc, &bytes_after);
+    let (report, sink) = svc.finish_with_sink();
+
+    assert!(report.ok, "clean run after mid-stream change: {report:?}");
+
+    // Framing stays bounded across the change.
+    for (i, (sc16, _)) in sink.packets.iter().enumerate() {
+        let iq = sc16.len() / 2;
+        if i + 1 == sink.packets.len() {
+            assert!(
+                iq <= OUTPUT_PACKET_SAMPLES,
+                "final packet {i} has {iq} samples"
+            );
+        } else {
+            assert_eq!(iq, OUTPUT_PACKET_SAMPLES, "packet {i} must be full");
+        }
+    }
+
+    // Timestamps remain contiguous across the reconfig boundary.
+    let step = OUTPUT_PACKET_SAMPLES as f64 / OUTPUT_RATE as f64;
+    let stamps = sink.timestamps();
+    for (i, pair) in stamps.windows(2).enumerate() {
+        let delta = pair[1] - pair[0];
+        assert!(
+            (delta - step).abs() < 1e-9,
+            "packet {} -> {}: step {delta}, expected {step}",
+            i,
+            i + 1
+        );
+    }
+    assert!(stamps[0].abs() < 1e-9, "the stream starts at zero");
+}
+
+/// Mid-stream rate change must rebuild filters and discard settling output cleanly.
+/// Feed packets, apply a valid new `output_rate_hz` that rebuilds filters, then
+/// verify (a) the filter chain is rebuilt (settling count changes), (b) output
+/// during the new settling period is not published as measurements, and
+/// (c) timestamp continuity is preserved.
+#[test]
+fn mid_stream_rate_change_rebuilds_filters_and_discards_settling() {
+    use sigproc_channelizer::ReconfigRequest;
+
+    // Start at 2 MS/s -> 50 kS/s (decimation 40), then change to 2 MS/s -> 100 kS/s
+    // (decimation 20). Both divide evenly.
+    let bytes_before = fixture(200_000.0, 0.15);
+    let bytes_after = fixture(200_000.0, 0.15);
+    let mut svc = service(200_000);
+
+    let settling_before = svc.settling_samples();
+    feed_all(&mut svc, &bytes_before);
+    assert!(
+        svc.samples_out() > OUTPUT_PACKET_SAMPLES as u64,
+        "need some output"
+    );
+
+    // Apply a rate change mid-stream.
+    let resp = svc.apply_reconfig(&ReconfigRequest {
+        offset_hz: None,
+        output_rate_hz: Some(100_000.0),
+    });
+    assert!(resp.ok, "rate change should succeed: {:?}", resp.error);
+    assert_eq!(resp.output_rate_hz, 100_000.0);
+
+    // (a) The filter chain is rebuilt: settling count changes because the plan differs.
+    let settling_after = svc.settling_samples();
+    assert!(
+        settling_after != settling_before,
+        "settling samples should change after a rate change: before {settling_before} after {settling_after}"
+    );
+
+    // Feed more packets after the change.
+    feed_all(&mut svc, &bytes_after);
+    let (report, sink) = svc.finish_with_sink();
+
+    assert!(
+        report.ok,
+        "clean run after mid-stream rate change: {report:?}"
+    );
+
+    // (c) Timestamp continuity is preserved across the change: timestamps are
+    // strictly increasing and start at zero. The step legitimately changes after
+    // the rate change (OUTPUT_PACKET_SAMPLES / new_rate), so we verify monotonicity
+    // rather than a constant step.
+    let stamps = sink.timestamps();
+    for (i, pair) in stamps.windows(2).enumerate() {
+        let delta = pair[1] - pair[0];
+        assert!(
+            delta > 0.0,
+            "packet {} -> {}: timestamps must increase monotonically, got delta {delta}",
+            i,
+            i + 1
+        );
+    }
+    assert!(stamps[0].abs() < 1e-9, "the stream starts at zero");
+
+    // Output sample count reflects both segments at their respective rates.
+    // Before: 0.15s * 2e6 / 40 = 7500 output samples.
+    // After:  0.15s * 2e6 / 20 = 15000 output samples.
+    // Total ~22500. Allow tolerance for settling truncation.
+    assert!(
+        (report.samples_out as f64 - 22_500.0).abs() < 1000.0,
+        "expected ~22500 output samples across the rate change, got {}",
+        report.samples_out
     );
 }

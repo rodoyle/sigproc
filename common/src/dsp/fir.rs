@@ -200,7 +200,7 @@ mod tests {
         let wide = estimate_taps(80.0, 100_000.0, 2_000_000.0);
         let narrow = estimate_taps(80.0, 5_000.0, 2_000_000.0);
         assert!(wide > 3 && narrow > 3);
-        assert!(wide.is_multiple_of(2) == false && narrow.is_multiple_of(2) == false);
+        assert!(!wide.is_multiple_of(2) && !narrow.is_multiple_of(2));
         assert!(
             narrow > wide * 5,
             "narrow transition must cost far more taps: {narrow} vs {wide}"

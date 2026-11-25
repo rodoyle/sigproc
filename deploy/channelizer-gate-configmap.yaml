@@ -20,11 +20,11 @@ metadata:
 data:
   config.toml: |
     [rf]
-    center_freq = 915_000_000.0
-    sample_rate = 2_000_000.0
+    center_freq = 915_000_000
+    sample_rate = 2_000_000
     rx_gain = 30.0
     antenna = "RX2"
-    bandwidth = 2_000_000.0
+    bandwidth = 2_000_000
 
     [forwarding]
     # The gate's own sink Service, so the standing sink is untouched.
@@ -39,5 +39,5 @@ data:
     metrics_listen = "0.0.0.0:8080"
 
     [channel]
-    offset_hz = 200_000.0
-    output_rate_hz = 50_000.0
+    offset_hz = 200_000
+    output_rate_hz = 50_000

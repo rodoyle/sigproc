@@ -69,13 +69,15 @@ pub fn plan_stages(
     stopband_db: f64,
     max_taps: usize,
 ) -> anyhow::Result<Vec<StagePlan>> {
-    if !(input_rate > 0.0) || !(output_rate > 0.0) {
+    // `is_nan()` is explicit so a NaN rate is still rejected: `!(r > 0.0)` was
+    // true for NaN, and `r <= 0.0` alone would silently let it through.
+    if input_rate.is_nan() || input_rate <= 0.0 || output_rate.is_nan() || output_rate <= 0.0 {
         anyhow::bail!("rates must be positive: input {input_rate}, output {output_rate}");
     }
     if output_rate > input_rate {
         anyhow::bail!("output_rate ({output_rate}) must not exceed input_rate ({input_rate})");
     }
-    if !(passband_hz > 0.0) || stopband_hz <= passband_hz {
+    if passband_hz.is_nan() || passband_hz <= 0.0 || stopband_hz <= passband_hz {
         anyhow::bail!("need 0 < passband_hz ({passband_hz}) < stopband_hz ({stopband_hz})");
     }
     if stopband_hz > output_rate / 2.0 + 1e-9 {
@@ -244,6 +246,55 @@ impl Channelizer {
         total
     }
 
+    /// Restart-free reconfiguration: update the channel offset and/or rebuild
+    /// the filter chain when the output rate changes.
+    ///
+    /// * Offset-only change: retune the NCO in place (phase preserved, no splatter).
+    /// * Rate change: rebuild the FIR stages from a fresh plan and reset settling.
+    ///
+    /// Returns the new settling sample count (input samples to discard before
+    /// level/offset are meaningful again).
+    pub fn reconfigure(
+        &mut self,
+        offset_hz: f64,
+        input_rate: f64,
+        output_rate: f64,
+        stopband_db: f64,
+        passband_hz: f64,
+    ) -> anyhow::Result<usize> {
+        // Offset-only change is cheap: just retune the NCO.
+        if (self.output_rate - output_rate).abs() < 1e-9 {
+            self.nco.set_offset_hz(offset_hz, input_rate);
+            return Ok(self.settling_samples());
+        }
+        // Rate change requires rebuilding the filter chain. Recompute the plan
+        // from the given rates and passband.
+        let stopband = output_rate * 0.5;
+        let plan = plan_stages(
+            input_rate,
+            output_rate,
+            passband_hz,
+            stopband,
+            stopband_db,
+            self.plan.last().map(|s| s.taps).unwrap_or(512),
+        )?;
+        let output_rate_new = plan.last().map(|s| s.output_rate).unwrap_or(output_rate);
+        let stages = plan
+            .iter()
+            .map(|s| {
+                let taps = kaiser_lowpass(s.taps, s.cutoff_hz, s.input_rate, stopband_db);
+                ChannelStage {
+                    i: FirDecimator::new(taps.clone(), s.factor),
+                    q: FirDecimator::new(taps, s.factor),
+                }
+            })
+            .collect();
+        self.nco = Nco::new(offset_hz, input_rate);
+        self.stages = stages;
+        self.plan = plan;
+        self.output_rate = output_rate_new;
+        Ok(self.settling_samples())
+    }
     /// Run interleaved sc16 wideband samples through the chain, appending the
     /// surviving narrowband samples to `out`.
     pub fn process(&mut self, interleaved_sc16: &[i16], out: &mut Vec<Iq>) {
@@ -514,6 +565,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn the_channel_is_centred_where_the_plan_says_it_is() {
         // A tone 300 Hz above the channel centre must appear 300 Hz above DC in
         // the narrowband output — this is what validates the mixer sign.

@@ -1,8 +1,9 @@
-# Service: channelizer ingress (wideband VITA49 in) and metrics endpoint.
+# Service: channelizer ingress (wideband VITA49 in), metrics, and HTTP control plane.
 #
-# Two ports on one Service because they belong to one workload:
+# Three ports on one Service because they belong to one workload:
 #   vita49-in (UDP 4810) — upstream producers (today: sigproc capture)
 #   metrics   (TCP 8080) — Prometheus scrape / manual curl
+#   c2        (TCP 4820) — restart-free state/config HTTP control plane
 apiVersion: v1
 kind: Service
 metadata:
@@ -22,4 +23,8 @@ spec:
     - name: metrics
       port: 8080
       targetPort: metrics
+      protocol: TCP
+    - name: c2
+      port: 4820
+      targetPort: c2
       protocol: TCP

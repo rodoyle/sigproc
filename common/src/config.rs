@@ -8,6 +8,11 @@
 //! destination, and the `[channel]` section. A misconfiguration is therefore
 //! reported identically by every service, and the live capture ConfigMap — which
 //! has no `[channel]` section — keeps parsing unchanged.
+//!
+//! Frequency fields are integers (Hz) per project convention: anything in hertz
+//! is an integer number. `center_freq` uses `u64` because the B210 tunes up to
+//! ~6 GHz (above the u32 ceiling); sample rate/bandwidth/output rate use `u32`
+//! since they stay well under 4 GHz.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -52,17 +57,17 @@ pub struct DeviceConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RfConfig {
-    /// Center frequency in Hz.
-    pub center_freq: f64,
+    /// Center frequency in Hz. Uses u64 because the B210 tunes up to ~6 GHz.
+    pub center_freq: u64,
     /// Sample rate in Hz (samples per second).
-    pub sample_rate: f64,
+    pub sample_rate: u32,
     /// RX gain in dB.
     pub rx_gain: f64,
     /// Antenna port (e.g. "RX2" on B210, "TX/RX" on B200).
     #[serde(default = "default_antenna")]
     pub antenna: String,
     /// Bandwidth in Hz.
-    pub bandwidth: f64,
+    pub bandwidth: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +117,9 @@ pub struct InputConfig {
     /// HTTP address for `/metrics` and `/healthz`.
     #[serde(default = "default_metrics_listen")]
     pub metrics_listen: String,
+    /// HTTP control-plane address for `/state` and `/config`. Empty disables it.
+    #[serde(default)]
+    pub c2_listen: String,
 }
 
 impl Default for InputConfig {
@@ -122,6 +130,7 @@ impl Default for InputConfig {
             file: None,
             realtime: false,
             metrics_listen: default_metrics_listen(),
+            c2_listen: String::new(),
         }
     }
 }
@@ -169,15 +178,15 @@ fn default_max_taps() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelConfig {
     /// Channel centre offset from the wideband centre, in Hz. May be negative
-    /// for a channel below the centre frequency.
-    pub offset_hz: f64,
+    /// for a channel below the centre frequency. Uses i64 to match center_freq.
+    pub offset_hz: i64,
     /// Narrowband output sample rate in Hz. `rf.sample_rate / output_rate_hz`
     /// must be a whole number, because this channelizer decimates by integers.
-    pub output_rate_hz: f64,
+    pub output_rate_hz: u32,
     /// Channel passband half-width in Hz. Defaults to 40% of `output_rate_hz`,
     /// which leaves a guard band below the output Nyquist.
     #[serde(default)]
-    pub passband_hz: Option<f64>,
+    pub passband_hz: Option<u32>,
     /// FIR stopband attenuation target in dB.
     #[serde(default = "default_stopband_db")]
     pub stopband_db: f64,
@@ -190,24 +199,25 @@ pub struct ChannelConfig {
 
 impl ChannelConfig {
     /// Channel passband half-width in Hz.
-    pub fn passband(&self) -> f64 {
-        self.passband_hz.unwrap_or(0.4 * self.output_rate_hz)
+    pub fn passband(&self) -> u32 {
+        self.passband_hz
+            .unwrap_or((self.output_rate_hz as f64 * 0.4) as u32)
     }
 
     /// Frequency above which the last stage must reject: the output Nyquist.
-    pub fn stopband(&self) -> f64 {
-        0.5 * self.output_rate_hz
+    pub fn stopband(&self) -> u32 {
+        (self.output_rate_hz as f64 * 0.5) as u32
     }
 
     /// Whole-number decimation factor, or a diagnostic saying what to change.
-    pub fn decimation(&self, input_rate: f64) -> anyhow::Result<usize> {
-        if !(self.output_rate_hz > 0.0) {
+    pub fn decimation(&self, input_rate: u32) -> anyhow::Result<usize> {
+        if self.output_rate_hz == 0 {
             anyhow::bail!(
                 "[channel] output_rate_hz must be positive, got {}",
                 self.output_rate_hz
             );
         }
-        let ratio = input_rate / self.output_rate_hz;
+        let ratio = input_rate as f64 / self.output_rate_hz as f64;
         let rounded = ratio.round();
         if rounded < 1.0 || (ratio - rounded).abs() > 1e-9 {
             anyhow::bail!(
@@ -228,18 +238,18 @@ impl ChannelConfig {
     /// rejected when the config is loaded rather than when the first packet
     /// arrives — the difference between a CrashLoopBackOff that names the problem
     /// and a pod that starts, falls behind, and drops samples.
-    pub fn validate(&self, input_rate: f64) -> anyhow::Result<()> {
+    pub fn validate(&self, input_rate: u32) -> anyhow::Result<()> {
         self.decimation(input_rate)?;
         // A channel lying outside the captured band cannot be isolated; failing
         // here beats emitting a channel of pure noise.
-        let span = self.offset_hz.abs() + self.passband();
-        if span > input_rate / 2.0 {
+        let span = self.offset_hz.unsigned_abs() + self.passband() as u64;
+        if span > input_rate as u64 / 2 {
             anyhow::bail!(
                 "[channel] offset_hz {} with passband {} spans {span} Hz, past the \
                  captured band edge ({} Hz) of a {input_rate} Hz input",
                 self.offset_hz,
                 self.passband(),
-                input_rate / 2.0
+                input_rate / 2
             );
         }
         self.plan(input_rate)?;
@@ -247,12 +257,12 @@ impl ChannelConfig {
     }
 
     /// Build the decimation stage plan for this channel.
-    pub fn plan(&self, input_rate: f64) -> anyhow::Result<Vec<crate::dsp::StagePlan>> {
+    pub fn plan(&self, input_rate: u32) -> anyhow::Result<Vec<crate::dsp::StagePlan>> {
         crate::dsp::plan_stages(
-            input_rate,
-            self.output_rate_hz,
-            self.passband(),
-            self.stopband(),
+            input_rate as f64,
+            self.output_rate_hz as f64,
+            self.passband() as f64,
+            self.stopband() as f64,
             self.stopband_db,
             self.max_taps,
         )
@@ -270,19 +280,19 @@ impl Config {
 
     /// Validate configuration values.
     fn validate(&self) -> anyhow::Result<()> {
-        if self.rf.center_freq <= 0.0 {
+        if self.rf.center_freq == 0 {
             anyhow::bail!(
                 "center_freq must be positive (Hz), got {}",
                 self.rf.center_freq
             );
         }
-        if self.rf.sample_rate <= 0.0 {
+        if self.rf.sample_rate == 0 {
             anyhow::bail!(
                 "sample_rate must be positive (Hz), got {}",
                 self.rf.sample_rate
             );
         }
-        if self.rf.bandwidth <= 0.0 {
+        if self.rf.bandwidth == 0 {
             anyhow::bail!("bandwidth must be positive (Hz), got {}", self.rf.bandwidth);
         }
         if self.forwarding.vita49_dest_port == 0 {
@@ -308,11 +318,11 @@ mod tests {
         [device]
         device_args = ""
         [rf]
-        center_freq = 915_000_000.0
-        sample_rate = 2_000_000.0
+        center_freq = 915_000_000
+        sample_rate = 2_000_000
         rx_gain = 30.0
         antenna = "RX2"
-        bandwidth = 2_000_000.0
+        bandwidth = 2_000_000
         [forwarding]
         vita49_dest_host = "waterfall-service.default.svc.cluster.local"
         vita49_dest_port = 4820
@@ -333,16 +343,16 @@ mod tests {
 
     const CHANNELIZER_TOML: &str = r#"
         [rf]
-        center_freq = 915_000_000.0
-        sample_rate = 2_000_000.0
+        center_freq = 915_000_000
+        sample_rate = 2_000_000
         rx_gain = 30.0
-        bandwidth = 2_000_000.0
+        bandwidth = 2_000_000
         [forwarding]
         vita49_dest_host = "vita49-sink.default.svc.cluster.local"
         vita49_dest_port = 4920
         [channel]
-        offset_hz = 200_000.0
-        output_rate_hz = 50_000.0
+        offset_hz = 200_000
+        output_rate_hz = 50_000
     "#;
 
     /// The live capture ConfigMap has no `[channel]` section and must keep parsing.
@@ -351,7 +361,7 @@ mod tests {
         let cfg: Config = toml::from_str(CAPTURE_TOML).expect("parses");
         assert!(cfg.channel.is_none());
         cfg.validate().expect("validates");
-        assert_eq!(cfg.rf.sample_rate, 2_000_000.0);
+        assert_eq!(cfg.rf.sample_rate, 2_000_000);
         assert_eq!(cfg.rf.antenna, "RX2");
     }
 
@@ -369,11 +379,11 @@ mod tests {
     fn channel_plan_defaults_are_derived_from_the_output_rate() {
         let cfg: Config = toml::from_str(CHANNELIZER_TOML).expect("parses");
         let ch = cfg.channel.as_ref().expect("channel section");
-        assert_eq!(ch.passband(), 20_000.0, "40% of a 50 kS/s output rate");
-        assert_eq!(ch.stopband(), 25_000.0, "the output Nyquist");
+        assert_eq!(ch.passband(), 20_000, "40% of a 50 kS/s output rate");
+        assert_eq!(ch.stopband(), 25_000, "the output Nyquist");
         assert_eq!(ch.stopband_db, 80.0);
         assert_eq!(ch.max_taps, 512);
-        assert_eq!(ch.decimation(2_000_000.0).expect("integer ratio"), 40);
+        assert_eq!(ch.decimation(2_000_000).expect("integer ratio"), 40);
         cfg.validate().expect("validates");
     }
 
@@ -381,7 +391,7 @@ mod tests {
     /// from audio habits, and 2 MS/s / 48 kS/s is not a whole number.
     #[test]
     fn config_non_integer_decimation_rejected() {
-        let toml_text = CHANNELIZER_TOML.replace("50_000.0", "48_000.0");
+        let toml_text = CHANNELIZER_TOML.replace("50_000", "48_000");
         let cfg: Config = toml::from_str(&toml_text).expect("TOML itself parses");
         let err = cfg
             .validate()
@@ -405,10 +415,10 @@ mod tests {
     #[test]
     fn a_channel_whose_transition_band_is_too_narrow_is_rejected_at_load() {
         let toml_text = CHANNELIZER_TOML
-            .replace("output_rate_hz = 50_000.0", "output_rate_hz = 80_000.0")
+            .replace("output_rate_hz = 50_000", "output_rate_hz = 80_000")
             .replace(
-                "offset_hz = 200_000.0",
-                "offset_hz = 200_000.0\n        passband_hz = 39_000.0",
+                "offset_hz = 200_000",
+                "offset_hz = 200_000\n        passband_hz = 39_000",
             );
         let cfg: Config = toml::from_str(&toml_text).expect("parses");
         let err = cfg
@@ -420,8 +430,7 @@ mod tests {
 
     #[test]
     fn a_channel_outside_the_captured_band_is_rejected() {
-        let toml_text =
-            CHANNELIZER_TOML.replace("offset_hz = 200_000.0", "offset_hz = 1_500_000.0");
+        let toml_text = CHANNELIZER_TOML.replace("offset_hz = 200_000", "offset_hz = 1_500_000");
         let cfg: Config = toml::from_str(&toml_text).expect("parses");
         let err = cfg.validate().expect_err("past the band edge").to_string();
         assert!(err.contains("band edge"), "{err}");
@@ -429,14 +438,14 @@ mod tests {
 
     #[test]
     fn a_negative_offset_is_legal() {
-        let toml_text = CHANNELIZER_TOML.replace("offset_hz = 200_000.0", "offset_hz = -200_000.0");
+        let toml_text = CHANNELIZER_TOML.replace("offset_hz = 200_000", "offset_hz = -200_000");
         let cfg: Config = toml::from_str(&toml_text).expect("parses");
         cfg.validate().expect("a channel below the centre is fine");
     }
 
     #[test]
     fn the_existing_capture_validation_still_fires() {
-        let bad = CAPTURE_TOML.replace("center_freq = 915_000_000.0", "center_freq = 0.0");
+        let bad = CAPTURE_TOML.replace("center_freq = 915_000_000", "center_freq = 0");
         let cfg: Config = toml::from_str(&bad).expect("parses");
         let err = cfg
             .validate()
@@ -488,5 +497,52 @@ mod tests {
         let err = cfg.validate().expect_err("bad address").to_string();
         assert!(err.contains("listen"), "{err}");
         assert!(err.contains("host:port"), "{err}");
+    }
+
+    /// Every shipped k8s ConfigMap consumed by a service that deserialises
+    /// `Config` must parse with the current schema. This keeps the deployed
+    /// manifests and the struct from drifting: a float where the schema now
+    /// expects `u64` fails at pod startup, not at build time.
+    #[test]
+    fn shipped_configmaps_parse_with_current_schema() {
+        let cases: [(&str, &str); 3] = [
+            (
+                "deploy/configmap.yaml",
+                include_str!("../../deploy/configmap.yaml"),
+            ),
+            (
+                "deploy/channelizer-configmap.yaml",
+                include_str!("../../deploy/channelizer-configmap.yaml"),
+            ),
+            (
+                "deploy/channelizer-gate-configmap.yaml",
+                include_str!("../../deploy/channelizer-gate-configmap.yaml"),
+            ),
+        ];
+        for (name, yaml) in cases {
+            // Each ConfigMap embeds TOML under `config.toml: |`; take that block
+            // and strip the block-scalar indent so it matches what the pod mounts.
+            let body = yaml
+                .split("config.toml: |")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{name} must contain a config.toml block"));
+            let toml_text: String = body
+                .lines()
+                .map(|l| l.strip_prefix("    ").unwrap_or(l))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                );
+            let cfg: Config = toml::from_str(&toml_text).unwrap_or_else(|e| {
+                panic!("{name} must parse with the current Config schema: {e}")
+            });
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("{name} must be a valid config: {e}"));
+            assert_eq!(
+                cfg.rf.center_freq, 915_000_000,
+                "{name}: hertz fields are whole numbers"
+            );
+        }
     }
 }

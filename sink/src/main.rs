@@ -172,7 +172,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 // Periodic health line for a standing consumer: without it the
                 // pod is silent until the day it exits.
                 if cli.report_interval > 0.0
-                    && now.duration_since(last_report) >= Duration::from_secs_f64(cli.report_interval)
+                    && now.duration_since(last_report)
+                        >= Duration::from_secs_f64(cli.report_interval)
                 {
                     last_report = now;
                     log::info!(

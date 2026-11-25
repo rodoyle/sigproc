@@ -852,10 +852,10 @@ pub use control::{
     hand_command, ControlBackend, ControlUpdate, Controllee, PendingExecute, PreparedControl,
 };
 #[cfg(test)]
-use control::{parse_command, CAM_ACK_APPLIED, CAM_ACK_REJECTED, CIF0_REFERENCE_LEVEL};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use control::{parse_command, CAM_ACK_APPLIED, CAM_ACK_REJECTED, CIF0_REFERENCE_LEVEL};
 
     impl ControlBackend for StreamContext {
         fn apply_and_readback(&mut self, update: ControlUpdate) -> anyhow::Result<StreamContext> {
@@ -1587,5 +1587,79 @@ mod tests {
         assert_eq!(&got_b[..nb], &ctx[..]);
         assert!(parse(&data).is_ok());
         assert!(matches!(parse(&ctx), Err(ParseError::ContextPacket)));
+        assert!(parse(&data).is_ok());
+        assert!(matches!(parse(&ctx), Err(ParseError::ContextPacket)));
+    }
+
+    /// The HTTP C2 mutation path calls `apply_update` directly with a
+    /// `ControlUpdate` (not a wire-format datagram). This test exercises that
+    /// path: valid updates apply and return readback; invalid ones fail closed
+    /// without mutating the controllee or backend.
+    #[test]
+    fn apply_update_applies_valid_settings_and_rejects_invalid() {
+        let start = StreamContext {
+            rf_freq_hz: 100e6,
+            sample_rate_hz: 1e6,
+            bandwidth_hz: 1e6,
+            gain_db: 10.0,
+        };
+        let mut ctl = Controllee::new(start, 17);
+        let mut backend = start;
+
+        // RF-only update through the HTTP path.
+        let applied = ctl
+            .apply_update(
+                ControlUpdate {
+                    rf_freq_hz: Some(915e6),
+                    ..Default::default()
+                },
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(applied.rf_freq_hz, 915e6);
+        assert_eq!(ctl.applied.rf_freq_hz, 915e6);
+        assert_eq!(backend.rf_freq_hz, 915e6);
+        // Untouched fields retain their previous values.
+        assert_eq!(ctl.applied.sample_rate_hz, 1e6);
+        assert_eq!(ctl.applied.gain_db, 10.0);
+
+        // Partial update: only gain changes.
+        let applied = ctl
+            .apply_update(
+                ControlUpdate {
+                    gain_db: Some(40.0),
+                    ..Default::default()
+                },
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(applied.gain_db, 40.0);
+        assert_eq!(ctl.applied.gain_db, 40.0);
+        assert_eq!(ctl.applied.rf_freq_hz, 915e6);
+
+        // Invalid update (negative frequency) fails closed without mutating.
+        let before = ctl.applied;
+        let before_backend = backend;
+        let err = ctl
+            .apply_update(
+                ControlUpdate {
+                    rf_freq_hz: Some(-1.0),
+                    ..Default::default()
+                },
+                &mut backend,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid"),
+            "invalid config must fail closed"
+        );
+        assert_eq!(
+            ctl.applied, before,
+            "invalid update must not mutate controllee"
+        );
+        assert_eq!(
+            backend, before_backend,
+            "invalid update must not mutate backend"
+        );
     }
 }

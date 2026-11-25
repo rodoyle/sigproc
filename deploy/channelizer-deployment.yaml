@@ -89,6 +89,9 @@ spec:
             - name: metrics
               containerPort: 8080
               protocol: TCP
+            - name: c2
+              containerPort: 4820
+              protocol: TCP
           # /healthz comes from the same dependency-free HTTP server as
           # /metrics.
           readinessProbe:

@@ -266,9 +266,8 @@ fn python_rate_client_talks_to_real_udp_controllee() {
     let client = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/vrt_set_rate.py");
     // An explicit override is authoritative; otherwise use the platform's
     // conventional Python 3 executable (Windows does not ship `python3`).
-    let python = std::env::var_os("SIGPROC_TEST_PYTHON").unwrap_or_else(|| {
-        if cfg!(windows) { "python" } else { "python3" }.into()
-    });
+    let python = std::env::var_os("SIGPROC_TEST_PYTHON")
+        .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
     let mut child = std::process::Command::new(python)
         .arg(client)
         .args([
@@ -322,11 +321,16 @@ fn default_control_endpoint_is_disabled() {
 /// Build the query-state command a Soapy client sends on open: no action, the
 /// query-state request bit, and zeroed field bodies for the requested fields.
 fn query_command(stream_id: u32, cif0: u32, message_id: u32) -> Vec<u8> {
-    let body_bytes = [(1u32 << 29, 8usize), (1 << 27, 8), (1 << 23, 4), (1 << 21, 8)]
-        .iter()
-        .filter(|(bit, _)| cif0 & bit != 0)
-        .map(|(_, size)| size)
-        .sum::<usize>();
+    let body_bytes = [
+        (1u32 << 29, 8usize),
+        (1 << 27, 8),
+        (1 << 23, 4),
+        (1 << 21, 8),
+    ]
+    .iter()
+    .filter(|(bit, _)| cif0 & bit != 0)
+    .map(|(_, size)| size)
+    .sum::<usize>();
     let mut buf = Vec::new();
     let header = (6u32 << 28) | (6 + body_bytes as u32 / 4);
     for value in [
@@ -354,11 +358,10 @@ fn python_bridge_remote_interoperates_with_actual_rust_controllee() {
     socket.set_nonblocking(true).unwrap();
     let endpoint = ControlSocket { socket, peer };
     let control_port = endpoint.socket.local_addr().unwrap().port();
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../test/vrt_control_bridge.py");
-    let python = std::env::var_os("SIGPROC_TEST_PYTHON").unwrap_or_else(|| {
-        if cfg!(windows) { "python" } else { "python3" }.into()
-    });
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/vrt_control_bridge.py");
+    let python = std::env::var_os("SIGPROC_TEST_PYTHON")
+        .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
     let mut child = std::process::Command::new(python)
         .arg(script)
         .args([
@@ -399,7 +402,9 @@ fn python_bridge_remote_interoperates_with_actual_rust_controllee() {
         }
     });
     let send = |stdin: &mut std::process::ChildStdin, packet: &[u8]| {
-        stdin.write_all(&(packet.len() as u32).to_be_bytes()).unwrap();
+        stdin
+            .write_all(&(packet.len() as u32).to_be_bytes())
+            .unwrap();
         stdin.write_all(packet).unwrap();
         stdin.flush().unwrap();
     };
@@ -407,13 +412,21 @@ fn python_bridge_remote_interoperates_with_actual_rust_controllee() {
     let cif0 = (1 << 29) | (1 << 27) | (1 << 23) | (1 << 21);
     send(&mut stdin, &query_command(17, cif0, 42));
     let datagram = poll(&endpoint);
-    assert_ne!(word(&datagram, 12), 42, "bridge must substitute its wire message ID");
+    assert_ne!(
+        word(&datagram, 12),
+        42,
+        "bridge must substitute its wire message ID"
+    );
     assert!(endpoint
         .prepare_streaming(&datagram, &mut ctl, || panic!("query stopped RX"))
         .unwrap()
         .is_none());
     let reply = rx.recv_timeout(Duration::from_secs(4)).unwrap().unwrap();
-    assert_eq!(word(&reply, 24), 42, "bridge restores the client message ID");
+    assert_eq!(
+        word(&reply, 24),
+        42,
+        "bridge restores the client message ID"
+    );
     assert_ne!(word(&reply, 20) & (1 << 18), 0);
     assert_eq!(word(&reply, 20) & ((1 << 19) | (1 << 10) | (1 << 16)), 0);
     assert_eq!(hz(&reply, 44), initial().rf_freq_hz);
@@ -425,8 +438,15 @@ fn python_bridge_remote_interoperates_with_actual_rust_controllee() {
     assert_eq!(word(&denied, 24), 1);
     assert_ne!(word(&denied, 20) & (1 << 16), 0);
     assert_eq!(word(&denied, 20) & (1 << 10), 0);
-    assert_eq!(word(&denied, 28), 0, "denial contains no fabricated readback");
-    assert!(endpoint.poll().unwrap().is_none(), "execute reached the collector");
+    assert_eq!(
+        word(&denied, 28),
+        0,
+        "denial contains no fabricated readback"
+    );
+    assert!(
+        endpoint.poll().unwrap().is_none(),
+        "execute reached the collector"
+    );
     assert_eq!(ctl.applied, initial());
     drop(stdin);
     reader.join().unwrap();
@@ -447,10 +467,13 @@ fn query_state_answers_from_confirmed_state_without_touching_hardware() {
     let request = query_command(17, cif0, 42);
     peer.send_to(&request, endpoint.socket.local_addr().unwrap())
         .unwrap();
-    assert!(endpoint
-        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("query stopped RX"))
-        .unwrap()
-        .is_none(), "query must not request a streamer restart");
+    assert!(
+        endpoint
+            .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("query stopped RX"))
+            .unwrap()
+            .is_none(),
+        "query must not request a streamer restart"
+    );
     let reply = receive(&peer);
 
     assert_eq!(word(&reply, 4), 17, "stream id echoed");
@@ -459,13 +482,21 @@ fn query_state_answers_from_confirmed_state_without_touching_hardware() {
     let cam = word(&reply, 20);
     assert_eq!(cam & (1 << 16), 0, "query must not report errors");
     assert_ne!(cam & (1 << 18), 0, "query-state acknowledgement bit");
-    assert_eq!(cam & ((1 << 19) | (1 << 10)), 0, "query must not claim execution");
+    assert_eq!(
+        cam & ((1 << 19) | (1 << 10)),
+        0,
+        "query must not claim execution"
+    );
     assert_eq!(word(&reply, 24), 42, "message id echoed");
     assert_eq!(word(&reply, 32), cif0, "supported fields reported");
     assert_eq!(hz(&reply, 36), 1e6, "bandwidth from confirmed state");
     assert_eq!(hz(&reply, 44), 100e6, "rf frequency from confirmed state");
     assert_eq!(hz(&reply, 56), 1e6, "sample rate from confirmed state");
-    assert_eq!(word(&reply, 52) as u16 as i16 as f64 / 128.0, 10.0, "gain from confirmed state");
+    assert_eq!(
+        word(&reply, 52) as u16 as i16 as f64 / 128.0,
+        10.0,
+        "gain from confirmed state"
+    );
     assert!(
         backend.calls.is_empty(),
         "a query must never reach the radio"
@@ -473,9 +504,12 @@ fn query_state_answers_from_confirmed_state_without_touching_hardware() {
     assert_eq!(ctl.applied, initial(), "a query must not mutate state");
 
     let request = query_command(17, 1 << 27, 43);
-    peer.send_to(&request, endpoint.socket.local_addr().unwrap()).unwrap();
+    peer.send_to(&request, endpoint.socket.local_addr().unwrap())
+        .unwrap();
     assert!(endpoint
-        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("subset query stopped RX"))
+        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!(
+            "subset query stopped RX"
+        ))
         .unwrap()
         .is_none());
     let reply = receive(&peer);
@@ -503,7 +537,10 @@ fn unsupported_dry_run_never_applies_even_with_valid_values() {
     assert_ne!(cam & (1 << 16), 0, "dry-run is not hardware validation");
     assert_eq!(cam & (1 << 10), 0, "a dry run executes nothing");
     assert_eq!(hz(&reply, 40), 100e6, "dry run reports unapplied state");
-    assert!(backend.calls.is_empty(), "a dry run must not reach the radio");
+    assert!(
+        backend.calls.is_empty(),
+        "a dry run must not reach the radio"
+    );
     assert_eq!(ctl.applied, initial(), "a dry run must not mutate state");
 
     let mut bad = vita49::hand_command(17, 1 << 27, &q20(-5.0));
@@ -572,21 +609,42 @@ fn only_validated_execute_requests_a_streamer_restart() {
     cancelled[..4].copy_from_slice(&header.to_be_bytes());
     cases.push(cancelled);
     for request in cases {
-        peer.send_to(&request, endpoint.socket.local_addr().unwrap()).unwrap();
-        assert!(endpoint.prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("rejected control stopped RX")).unwrap().is_none());
+        peer.send_to(&request, endpoint.socket.local_addr().unwrap())
+            .unwrap();
+        assert!(endpoint
+            .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!(
+                "rejected control stopped RX"
+            ))
+            .unwrap()
+            .is_none());
         let ack = receive(&peer);
-        assert_eq!(word(&ack, 20) & (1 << 10), 0, "nonmutating ACK cannot claim execute");
-        assert_ne!(word(&ack, 20) & (1 << 16), 0, "invalid/unsupported request must reject");
+        assert_eq!(
+            word(&ack, 20) & (1 << 10),
+            0,
+            "nonmutating ACK cannot claim execute"
+        );
+        assert_ne!(
+            word(&ack, 20) & (1 << 16),
+            0,
+            "invalid/unsupported request must reject"
+        );
         assert!(backend.calls.is_empty());
         assert_eq!(ctl.applied, initial());
     }
 
     // Malformed packets are dropped and must not stop the streamer either.
-    peer.send_to(&[0; 7], endpoint.socket.local_addr().unwrap()).unwrap();
-    assert!(endpoint.prepare_streaming(&poll(&endpoint), &mut ctl, || panic!("malformed control stopped RX")).unwrap().is_none());
+    peer.send_to(&[0; 7], endpoint.socket.local_addr().unwrap())
+        .unwrap();
+    assert!(endpoint
+        .prepare_streaming(&poll(&endpoint), &mut ctl, || panic!(
+            "malformed control stopped RX"
+        ))
+        .unwrap()
+        .is_none());
     assert!(peer.recv(&mut [0; 256]).is_err());
 
-    peer.send_to(&valid, endpoint.socket.local_addr().unwrap()).unwrap();
+    peer.send_to(&valid, endpoint.socket.local_addr().unwrap())
+        .unwrap();
     let mut stops = 0;
     let pending = endpoint
         .prepare_streaming(&poll(&endpoint), &mut ctl, || {
@@ -596,9 +654,15 @@ fn only_validated_execute_requests_a_streamer_restart() {
         .unwrap()
         .expect("only a validated execute requests streamer release");
     assert_eq!(stops, 1, "valid execute must stop RX exactly once");
-    assert!(backend.calls.is_empty(), "preparation must not reach hardware");
+    assert!(
+        backend.calls.is_empty(),
+        "preparation must not reach hardware"
+    );
     assert_eq!(ctl.applied, initial());
-    assert!(peer.recv(&mut [0; 256]).is_err(), "no ACK before hardware readback");
+    assert!(
+        peer.recv(&mut [0; 256]).is_err(),
+        "no ACK before hardware readback"
+    );
     endpoint.execute(pending, &mut ctl, &mut backend).unwrap();
     let ack = receive(&peer);
     assert_ne!(word(&ack, 20) & (1 << 10), 0);
@@ -618,8 +682,13 @@ fn prepared_execute_cannot_apply_to_changed_or_foreign_state() {
             ctl.applied.sample_rate_hz = 2e6;
             ctl
         };
-        assert!(endpoint.execute(pending, &mut target, &mut backend).is_err());
-        assert!(backend.calls.is_empty(), "stale plan must fail before hardware");
+        assert!(endpoint
+            .execute(pending, &mut target, &mut backend)
+            .is_err());
+        assert!(
+            backend.calls.is_empty(),
+            "stale plan must fail before hardware"
+        );
     }
 }
 
@@ -636,5 +705,8 @@ fn streamer_stop_failure_cannot_proceed_to_hardware_or_ack() {
     assert_eq!(stops, 1);
     assert_eq!(ctl.applied, initial());
     assert!(backend.calls.is_empty());
-    assert!(peer.recv(&mut [0; 256]).is_err(), "no ACK before apply/readback");
+    assert!(
+        peer.recv(&mut [0; 256]).is_err(),
+        "no ACK before apply/readback"
+    );
 }
