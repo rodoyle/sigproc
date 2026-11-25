@@ -1,6 +1,6 @@
 ---
 date: 2026-11-25
-status: proposed — blocked on one sender-side entry criterion
+status: proposed — blocked on one network-side entry criterion
 depends_on: docs/plans/service-c2-and-networking.md (the original "prove then retire" direction)
 related_repo: github.com/rodoyle/waterfall (consumer + deploy manifests)
 owners: sigproc (sender, this document), waterfall (consumer), infra (node/L2, rollout)
@@ -74,22 +74,37 @@ sources: 192.168.0.55:37108 = 9,643,689   (multicast)
          192.168.0.55:4508  = 5,123,376   (unicast)
 ```
 
-The multicast socket delivers each datagram more than once (1.88–2.0× unicast,
+The multicast socket delivers each datagram more than once (1.9–2.0× unicast,
 both copies from the *same* source port, trailing by ~0.35–0.7 ms). The capture
 send path is proven to emit exactly one datagram per packet —
 `Vita49Forwarder::send_one_with` performs a single `send_to`
 (`common/src/vita49.rs`), `packets_sent` only increments on a full write, and
 nothing joined `239.255.49.2` could re-emit a looped copy. So the second frame is
-produced below the application, on `rpi-four-2` or the first hop. The leading
-hypothesis is that two ports of one bridge carry `192.168.0.55`, so one `sendto`
-is flooded out both.
+produced below the application.
 
-Confirm or reject it on the sender node before retiring:
+**Confirmed 2026-11-25: the second frame exists only on the wired segment.** Two
+receivers counted overlapping 8 s windows at the same moment:
+
+| Receiver | Link | Copies per datagram |
+| --- | --- | --- |
+| `192.168.0.15` | wired | 1.9999 |
+| `192.168.0.20` (`wlp3s0`) | Wi-Fi | 1.0 |
+
+The wireless receiver got exactly one copy of everything it received, so the
+application transmits once and something on the wireless side of the L2
+re-injects the frame onto the wire. That also rules out IP-layer multicast
+forwarding: the stream carries `ttl = 1`, and a routed copy would be decremented
+to 0 and dropped rather than delivered. Look for a bridge, repeater or WDS path
+between the AP and the wired segment — not `mrouted`, `smcroute` or `igmpproxy`.
+
+Re-confirm with two receivers at once, one on each link. A single receiver
+cannot distinguish L2 re-injection from a sender that transmits twice:
 
 ```bash
-ip -d link show                 # is 192.168.0.55 on a bridge, and how many ports?
-bridge link show
-ip route get 239.255.49.2
+python test/vrt_path_probe.py --group 239.255.49.2 --port 4820 \
+    --interface <wired ip> --seconds 8
+python test/vrt_path_probe.py --group 239.255.49.2 --port 4820 \
+    --interface <wifi ip> --seconds 8
 ```
 
 `test/mcast_emit_probe.py` (emits a known number of VRT-shaped datagrams from one
@@ -233,5 +248,6 @@ sha256:0b3867bb (commit 3fc93e2):**
   unicast `192.168.0.55:4508`.
 
 Criterion 2 and 3 pass on this evidence. Criterion 4 does not: multicast is
-delivered ~1.9× per datagram, a sender-side/below-application duplication that
+delivered ~1.9× per datagram, a below-application duplication that exists only
+on the wired segment and
 is still open. Unicast therefore stays.
