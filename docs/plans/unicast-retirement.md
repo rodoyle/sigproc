@@ -272,6 +272,18 @@ sha256:0b3867bb (commit 3fc93e2):**
   port that also appears at a third host is the multicast socket" — never a fixed
   number — and more than two entries means restarts, not extra paths.
 
+  To tell live sockets from frozen ones, sample `/stats` twice about 10 s apart
+  and take the delta per source address: only the sockets that are still moving
+  are carrying traffic. This distinguishes "the collector restarted" from "more
+  paths exist", and it is cheap enough to run before any retirement decision. It
+  is also the check that was got wrong once here — the four entries were read as
+  four paths when two of them were frozen lifetime totals.
+
+  That restart left the 2:1 split unchanged, which is evidence in its own right:
+  the duplication depends on the path, not on the process or the socket that
+  happens to be sending. A ratio measured after a collector restart is therefore
+  still valid.
+
 Criterion 2 and 3 pass on this evidence. Criterion 4 does not: multicast is
 delivered ~1.9× per datagram, a below-application duplication that exists only
 on the wired segment only. It is still open, so unicast stays.
