@@ -269,7 +269,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     Ok(http_c2::LoopRequest::Config {
                         update,
                         auth_token,
-                        stream,
+                        mut stream,
                     }) => {
                         metrics.control();
                         let resp = if auth_token.as_deref() != Some(auth.as_str()) {
@@ -295,7 +295,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         // Apply each pending HTTP mutation through the sole-owner backend,
         // replying to each client so no queued mutation is dropped.
-        for (update, stream) in pending_http {
+        for (update, mut stream) in pending_http {
             let resp =
                 match controllee.apply_update(update, &mut uhd_control::UhdControl(&mut usrp)) {
                     Ok(ctx) => {
