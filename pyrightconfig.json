@@ -1,0 +1,14 @@
+{
+  "include": [
+    "test",
+    "scripts",
+    "deploy"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "ignore": [
+    "graphs",
+    "**/graphs/**"
+  ]
+}

@@ -28,6 +28,10 @@ concurrency:
   group: rc-build-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   REGISTRY: ghcr.io
   OWNER: rodoyle
@@ -39,6 +43,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # releases/v4
+        with:
+          persist-credentials: false
 
       - name: Compute short SHA
         id: sha
